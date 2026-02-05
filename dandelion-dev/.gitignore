@@ -1,0 +1,6 @@
+build/
+datasets/
+gege/*.log
+*.swp
+*.swo
+gege/examples/configuration/*.yaml
