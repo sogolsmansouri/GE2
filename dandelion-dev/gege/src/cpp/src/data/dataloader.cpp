@@ -138,6 +138,16 @@ void DataLoader::nextEpoch() {
 }
 
 void DataLoader::setActiveEdges(int32_t device_idx) {
+    auto state = graph_storage_->current_subgraph_states_[device_idx];
+    if (state != nullptr && state->all_in_memory_edges_.defined()) {
+        SPDLOG_INFO("setActiveEdges: device={} in_mem_edges size={}x{}",
+                    device_idx,
+                    state->all_in_memory_edges_.size(0),
+                    state->all_in_memory_edges_.size(1));
+    } else {
+        SPDLOG_INFO("setActiveEdges: device={} in_mem_edges undefined", device_idx);
+    }
+
     EdgeList active_edges;
 
     if (graph_storage_->useInMemorySubGraph()) {
@@ -501,6 +511,11 @@ shared_ptr<Batch> DataLoader::getNextBatch(int32_t device_idx) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
 
+                // ensure all devices finished the current round before swapping
+                while (activate_devices_.load() > 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+
                 int next_round_id = 0;
                 if (device_idx < device_swap_rounds_.size()) {
                     next_round_id = device_swap_rounds_[device_idx] + 1;
@@ -510,17 +525,23 @@ shared_ptr<Batch> DataLoader::getNextBatch(int32_t device_idx) {
                     logTransferPlanRound(next_round_id);
                 }
 
-                c10::cuda::CUDACachingAllocator::emptyCache();
+                if (devices_.size() <= 1) {
+        c10::cuda::CUDACachingAllocator::emptyCache();
+    }
                 // SPDLOG_INFO("Swapping subgraph for device {}", device_idx);
                 // auto t1 = std::chrono::high_resolution_clock::now();
                 graph_storage_->updateInMemorySubGraph(device_idx);
                 // SPDLOG_INFO("graph_storage_->updateInMemorySubGraph");
 
-                c10::cuda::CUDACachingAllocator::emptyCache();
+                if (devices_.size() <= 1) {
+        c10::cuda::CUDACachingAllocator::emptyCache();
+    }
                 // auto t11 = std::chrono::high_resolution_clock::now();
                 // SPDLOG_INFO("Time to updateInMemorySubGraph for device {}: {} ms", device_idx, std::chrono::duration_cast<std::chrono::milliseconds>(t11 - t1).count());
                 initializeBatches(false, device_idx);
-                c10::cuda::CUDACachingAllocator::emptyCache();
+                if (devices_.size() <= 1) {
+        c10::cuda::CUDACachingAllocator::emptyCache();
+    }
 
                 swap_tasks_completed ++;
                 activate_devices_ ++;
@@ -624,6 +645,13 @@ void DataLoader::edgeSample(shared_ptr<Batch> batch, int32_t device_idx) {
 
     if (negative_sampler_ != nullptr) {
         negativeSample(batch);
+    }
+
+    if (!train_) {
+        int64_t edges_n = batch->edges_.defined() ? batch->edges_.size(0) : -1;
+        int64_t src_neg_n = batch->src_neg_indices_.defined() ? batch->src_neg_indices_.numel() : -1;
+        int64_t dst_neg_n = batch->dst_neg_indices_.defined() ? batch->dst_neg_indices_.numel() : -1;
+        SPDLOG_INFO("eval negatives: edges={} src_neg_numel={} dst_neg_numel={}", edges_n, src_neg_n, dst_neg_n);
     }
     // std::cout << batch->src_neg_indices_ << std::endl;
     // std::cout << batch->edges_.sizes() << " " <<  batch->src_neg_indices_.sizes() << " " << batch->dst_neg_indices_.sizes() << std::endl;

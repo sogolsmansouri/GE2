@@ -55,6 +55,10 @@ class GraphModelStorage {
 
     std::vector<EdgeList> active_edges_;
     std::vector<torch::Device> devices_;
+    std::mutex p2p_update_mutex_;
+    std::condition_variable p2p_update_cv_;
+    int p2p_update_gen_ = 0;
+    std::vector<int> p2p_update_last_seen_;
     Indices active_nodes_;
     torch::Tensor perm_;
 
@@ -227,6 +231,14 @@ class GraphModelStorage {
     }
 
     void performSwap(int32_t device_idx = 0) {
+        // If P2P inter-GPU swap is enabled, only trigger once (device 0).
+        auto p2p_guard = std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_embeddings);
+        if (!p2p_guard) {
+            p2p_guard = std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_embeddings_g);
+        }
+        if (p2p_guard && p2p_guard->interGpuSwapEnabled() && device_idx != 0) {
+            return;
+        }
         if (storage_ptrs_.node_embeddings != nullptr && instance_of<Storage, PartitionBufferStorage>(storage_ptrs_.node_embeddings)) {
             std::dynamic_pointer_cast<PartitionBufferStorage>(storage_ptrs_.node_embeddings)->performNextSwap();
             if (storage_ptrs_.node_optimizer_state != nullptr && train_) {
@@ -236,9 +248,17 @@ class GraphModelStorage {
 
         if (storage_ptrs_.node_embeddings != nullptr && instance_of<Storage, MemPartitionBufferStorage>(storage_ptrs_.node_embeddings)) {
             std::vector<std::thread> threads;
-            threads.push_back(std::thread(&MemPartitionBufferStorage::performNextSwap, std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_embeddings), device_idx));
+            for (int d = 0; d < devices_.size(); ++d) {
+                threads.push_back(std::thread(&MemPartitionBufferStorage::performNextSwap,
+                                              std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_embeddings),
+                                              d));
+            }
             if (storage_ptrs_.node_optimizer_state != nullptr && train_) {
-                threads.push_back(std::thread(&MemPartitionBufferStorage::performNextSwap, std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_optimizer_state), device_idx));
+                for (int d = 0; d < devices_.size(); ++d) {
+                    threads.push_back(std::thread(&MemPartitionBufferStorage::performNextSwap,
+                                                  std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_optimizer_state),
+                                                  d));
+                }
             }
             for(auto& thread : threads) {
                 thread.join();
@@ -251,9 +271,13 @@ class GraphModelStorage {
         }
 
         if (storage_ptrs_.node_embeddings_g != nullptr && instance_of<Storage, MemPartitionBufferStorage>(storage_ptrs_.node_embeddings_g)) {
-            std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_embeddings_g)->performNextSwap(device_idx);
+            for (int d = 0; d < devices_.size(); ++d) {
+                std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_embeddings_g)->performNextSwap(d);
+            }
             if (storage_ptrs_.node_optimizer_state_g != nullptr && train_) {
-                std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_optimizer_state_g)->performNextSwap(device_idx);
+                for (int d = 0; d < devices_.size(); ++d) {
+                    std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_optimizer_state_g)->performNextSwap(d);
+                }
             }
         }
 

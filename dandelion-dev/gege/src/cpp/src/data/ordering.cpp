@@ -348,7 +348,7 @@ std::tuple<vector<torch::Tensor>, vector<torch::Tensor>> getDispersedNodePartiti
     // randomly assign train nodes to buffers
 
     int64_t partition_size = ceil((double)total_num_nodes / num_partitions);
-    torch::Tensor train_nodes_partition = train_nodes.divide(partition_size, "trunc");
+    torch::Tensor train_nodes_partition = train_nodes.to(torch::kLong).div((int64_t)partition_size);
 
     std::vector<std::vector<int>> partition_buffer_states(num_partitions);
 
@@ -389,7 +389,7 @@ std::tuple<vector<torch::Tensor>, vector<torch::Tensor>> getDispersedNodePartiti
 std::tuple<vector<torch::Tensor>, vector<torch::Tensor>> getSequentialNodePartitionOrdering(Indices train_nodes, int64_t total_num_nodes, int num_partitions,
                                                                                             int buffer_capacity) {
     int64_t partition_size = ceil((double)total_num_nodes / num_partitions);
-    torch::Tensor train_nodes_partition = train_nodes.divide(partition_size, "trunc");
+    torch::Tensor train_nodes_partition = train_nodes.to(torch::kLong).div((int64_t)partition_size);
 
     int32_t max_train_partition = torch::max(train_nodes_partition).item<int32_t>();
     int32_t num_train_partitions = max_train_partition + 1;

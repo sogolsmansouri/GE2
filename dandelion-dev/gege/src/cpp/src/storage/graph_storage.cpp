@@ -1,4 +1,5 @@
 #include "storage/graph_storage.h"
+#include <c10/cuda/CUDACachingAllocator.h>
 
 #include <algorithm>
 #include <random>
@@ -539,7 +540,9 @@ void GraphModelStorage::initializeInMemorySubGraph(torch::Tensor buffer_state, t
 
         mapped_edges          = merge_sorted_edge_buckets(mapped_edges, in_mem_edge_bucket_starts, buffer_size, true);
         mapped_edges_dst_sort = merge_sorted_edge_buckets(mapped_edges, in_mem_edge_bucket_starts, buffer_size, false);
+        if (devices_.size() <= 1) {
         c10::cuda::CUDACachingAllocator::emptyCache();
+    }
 
         mapped_edges = mapped_edges.to(torch::kInt64);
         mapped_edges_dst_sort = mapped_edges_dst_sort.to(torch::kInt64);
@@ -603,13 +606,67 @@ void GraphModelStorage::updateInMemorySubGraph(int32_t device_idx) {
             getNextSubGraph();
         }
     } else {
-        std::pair<std::vector<int>, std::vector<int>> current_swap_ids = getNextSwapIds(device_idx);
+        
+        auto p2p_guard = std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_embeddings);
+        if (!p2p_guard) {
+            p2p_guard = std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_embeddings_g);
+        }
+        if (p2p_guard && p2p_guard->interGpuSwapEnabled()) {
+            {
+                std::lock_guard<std::mutex> lk(p2p_update_mutex_);
+                if (p2p_update_last_seen_.size() != devices_.size()) {
+                    p2p_update_last_seen_.assign(devices_.size(), 0);
+                }
+            }
+            if (device_idx != 0) {
+                std::unique_lock<std::mutex> lk(p2p_update_mutex_);
+                int last = p2p_update_last_seen_[device_idx];
+                if (p2p_update_gen_ != last) {
+                    p2p_update_last_seen_[device_idx] = p2p_update_gen_;
+                    return;
+                }
+                p2p_update_cv_.wait(lk, [&]{ return p2p_update_gen_ != last; });
+                p2p_update_last_seen_[device_idx] = p2p_update_gen_;
+                return;
+            }
+
+            std::vector<std::pair<std::vector<int>, std::vector<int>>> swap_ids_per_device(devices_.size());
+            for (int d = 0; d < devices_.size(); ++d) {
+                swap_ids_per_device[d] = getNextSwapIds(d);
+            }
+            auto t1 = std::chrono::high_resolution_clock::now();
+            performSwap(0);
+            auto t2 = std::chrono::high_resolution_clock::now();
+            if (devices_.size() <= 1) {
+        c10::cuda::CUDACachingAllocator::emptyCache();
+    }
+
+            for (int d = 0; d < devices_.size(); ++d) {
+                updateInMemorySubGraph_(current_subgraph_states_[d], swap_ids_per_device[d], d);
+            }
+
+            {
+                std::lock_guard<std::mutex> lk(p2p_update_mutex_);
+                p2p_update_gen_++;
+                if (p2p_update_last_seen_.size() != devices_.size()) {
+                    p2p_update_last_seen_.assign(devices_.size(), 0);
+                }
+                for (int d = 0; d < devices_.size(); ++d) {
+                    p2p_update_last_seen_[d] = p2p_update_gen_;
+                }
+            }
+            p2p_update_cv_.notify_all();
+            return;
+        }
+std::pair<std::vector<int>, std::vector<int>> current_swap_ids = getNextSwapIds(device_idx);
         // SPDLOG_INFO("performSwap");
         auto t1 = std::chrono::high_resolution_clock::now();
         performSwap(device_idx);
         auto t2 = std::chrono::high_resolution_clock::now();
         // SPDLOG_INFO("performSwap time {}", std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count());
+        if (devices_.size() <= 1) {
         c10::cuda::CUDACachingAllocator::emptyCache();
+    }
         // SPDLOG_INFO("updateInMemorySubGraph_");
         t1 = std::chrono::high_resolution_clock::now();
         updateInMemorySubGraph_(current_subgraph_states_[device_idx], current_swap_ids, device_idx);
@@ -851,12 +908,16 @@ void GraphModelStorage::updateInMemorySubGraph_(shared_ptr<InMemorySubgraphState
     mapped_edges = mapped_edges.to(devices_[device_idx]);
     subgraph->all_in_memory_mapped_edges_ = mapped_edges;
     subgraph->in_memory_subgraph_ = nullptr;
-    c10::cuda::CUDACachingAllocator::emptyCache();
+    if (devices_.size() <= 1) {
+        c10::cuda::CUDACachingAllocator::emptyCache();
+    }
 
     mapped_edges = merge_sorted_edge_buckets(mapped_edges, in_mem_edge_bucket_starts, buffer_size, true);
     mapped_edges_dst_sort = merge_sorted_edge_buckets(mapped_edges, in_mem_edge_bucket_starts, buffer_size, false);
     
-    c10::cuda::CUDACachingAllocator::emptyCache();
+    if (devices_.size() <= 1) {
+        c10::cuda::CUDACachingAllocator::emptyCache();
+    }
 
     mapped_edges = mapped_edges.to(torch::kInt64);
     mapped_edges_dst_sort = mapped_edges_dst_sort.to(torch::kInt64);

@@ -1,4 +1,6 @@
 #include "engine/graph_encoder.h"
+#include <cuda_runtime.h>
+#include <ATen/cuda/CUDAContext.h>
 
 #include "reporting/logger.h"
 
@@ -34,7 +36,7 @@ void SynchronousGraphEncoder::encode(bool separate_layers) {
         encoded_nodes = encoded_nodes.contiguous().to(torch::kCPU);
 
         if (model_->device_.is_cuda()) {
-            torch::cuda::synchronize();
+            cudaDeviceSynchronize();
         }
 
         dataloader_->graph_storage_->updatePutEncodedNodesRange(batch->start_idx_, batch->batch_size_, encoded_nodes);

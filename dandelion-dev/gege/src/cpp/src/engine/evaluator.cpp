@@ -18,6 +18,8 @@ void SynchronousEvaluator::evaluate(bool validation) {
         }
     }
 
+    // Reload buffers/subgraph for evaluation (training may have unloaded them).
+    dataloader_->loadStorage();
     dataloader_->initializeBatches(false);
 
     if (dataloader_->evaluation_negative_sampler_ != nullptr) {

@@ -812,7 +812,9 @@ void MemPartitionBuffer::performNextSwap() {
     unload(true);
     auto t2 = std::chrono::high_resolution_clock::now();
     // SPDLOG_INFO("Eviction time: {}", std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count());
-    c10::cuda::CUDACachingAllocator::emptyCache();
+    if (buffer_sizes_ <= 1) {
+        c10::cuda::CUDACachingAllocator::emptyCache();
+    }
     
     buffer_state_ = *buffer_state_iterator_;
 
@@ -826,7 +828,9 @@ void MemPartitionBuffer::performNextSwap() {
     load(data_storage_);
     t2 = std::chrono::high_resolution_clock::now();
     // SPDLOG_INFO("Admission time: {}", std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count());
-    c10::cuda::CUDACachingAllocator::emptyCache();
+    if (buffer_sizes_ <= 1) {
+        c10::cuda::CUDACachingAllocator::emptyCache();
+    }
 
     int64_t num_nodes = 0;
 

@@ -97,6 +97,28 @@ std::tuple<shared_ptr<Storage>, shared_ptr<Storage>, shared_ptr<Storage>> initia
     }
 
     if (use_buffer) {
+        auto log_partition_info = [&](const char* split,
+                                      const string& path,
+                                      const shared_ptr<Storage>& storage,
+                                      int64_t expected_edges) {
+            if (!fileExists(path)) {
+                SPDLOG_ERROR("Missing edge partition offsets file ({}): {}", split, path);
+                throw std::runtime_error("");
+            }
+            storage->readPartitionSizes(path);
+            auto sizes = storage->getEdgeBucketSizes();
+            int64_t sum = 0;
+            for (auto s : sizes) {
+                sum += s;
+            }
+            SPDLOG_INFO("{} edge buckets: count={} sum={} expected_edges={} file={}",
+                        split, sizes.size(), sum, expected_edges, path);
+            if (sizes.empty()) {
+                SPDLOG_ERROR("Empty edge bucket sizes for {} (file: {})", split, path);
+                throw std::runtime_error("");
+            }
+        };
+
         string train_edges_partitions =
             storage_config->dataset->dataset_dir + PathConstants::edges_directory + PathConstants::training + PathConstants::edge_partition_offsets_file;
 
@@ -107,15 +129,15 @@ std::tuple<shared_ptr<Storage>, shared_ptr<Storage>, shared_ptr<Storage>> initia
             storage_config->dataset->dataset_dir + PathConstants::edges_directory + PathConstants::test + PathConstants::edge_partition_offsets_file;
 
         if (train_edge_storage != nullptr) {
-            train_edge_storage->readPartitionSizes(train_edges_partitions);
+            log_partition_info("train", train_edges_partitions, train_edge_storage, num_train);
         }
 
         if (valid_edge_storage != nullptr) {
-            valid_edge_storage->readPartitionSizes(validation_edges_partitions);
+            log_partition_info("validation", validation_edges_partitions, valid_edge_storage, num_valid);
         }
 
         if (test_edge_storage != nullptr) {
-            test_edge_storage->readPartitionSizes(test_edges_partitions);
+            log_partition_info("test", test_edges_partitions, test_edge_storage, num_test);
         }
     } else {
         if (storage_config->shuffle_input) {

@@ -1,0 +1,68 @@
+model:
+  learning_task: LINK_PREDICTION
+  encoder:
+    layers:
+    - - type: EMBEDDING
+        output_dim: 100
+  decoder:
+    type: DISTMULT
+    options:
+      input_dim: 100
+  loss:
+    type: SOFTMAX_CE
+    options:
+      reduction: SUM
+  dense_optimizer:
+    type: ADAM
+    options:
+      learning_rate: 0.1
+  sparse_optimizer:
+    type: ADAGRAD
+    options:
+      learning_rate: 0.1
+storage:
+  device_type: cuda
+  device_ids:
+  - 0
+  - 1
+  - 2
+  - 3
+  dataset:
+    dataset_dir: /mnt/beegfs/smansou2/GE2/dandelion-dev/gege/datasets/fb15k_16p/
+  edges:
+    type: HOST_MEMORY
+    options:
+      dtype: int
+  embeddings:
+    type: MEM_PARTITION_BUFFER
+    options:
+      num_partitions: 16
+      buffer_capacity: 4
+      prefetching: false
+      fine_to_coarse_ratio: 1
+      num_cache_partitions: 0
+      edge_bucket_ordering: CUSTOM
+      randomly_assign_edge_buckets: false
+      randomize_partition_ids: false
+      shuffle_buffer_states: false
+      inter_gpu_swap: false
+  prefetch: false
+  save_model: false
+  model_dir: /mnt/beegfs/smansou2/GE2/dandelion-dev/gege/outputs/fb15k_16p/model_0_arc
+training:
+  batch_size: 2000
+  negative_sampling_method: RNS
+  negative_sampling:
+    num_chunks: 10
+    negatives_per_positive: 200
+    degree_fraction: 0.5
+    filtered: false
+  num_epochs: 10
+  epochs_per_shuffle: 1
+  save_model: false
+evaluation:
+  epochs_per_eval: 2
+  batch_size: 1000
+  negative_sampling:
+    filtered: true
+    negatives_per_positive: 200
