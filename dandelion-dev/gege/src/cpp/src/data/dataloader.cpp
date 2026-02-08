@@ -625,7 +625,7 @@ shared_ptr<Batch> DataLoader::getBatch(at::optional<torch::Device> device, bool 
     if (device.has_value()) {
         if (device.value().is_cuda()) {
             batch->to(device.value());
-            loadGPUParameters(batch);
+            loadGPUParameters(batch, device_idx);
             batch->dense_graph_.performMap();
         }
     }
@@ -644,7 +644,7 @@ void DataLoader::edgeSample(shared_ptr<Batch> batch, int32_t device_idx) {
     }
 
     if (negative_sampler_ != nullptr) {
-        negativeSample(batch);
+        negativeSample(batch, device_idx);
     }
 
     if (!train_) {

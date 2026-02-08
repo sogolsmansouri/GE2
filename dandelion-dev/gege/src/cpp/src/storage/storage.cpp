@@ -916,7 +916,7 @@ InMemory::InMemory(torch::Tensor data) {
     data_ = data.reshape({dim0_size_, dim1_size_});
 
     initialized_ = true;
-    dtype_ = data.dtype().toScalarType();
+    dtype_ = data.scalar_type();
     device_ = data.device();
     loaded_ = true;
 }
