@@ -1,0 +1,1120 @@
+        GE2: A General and Efficient Knowledge Graph Embedding
+                   Learning System (Technical Report)
+                                                                          Anonymous Author(s)
+                                                                                                                  3%*                                                       
+ABSTRACT
+
+
+
+
+                                                                                              *38
+                                                                                                             '*/.(                                                                                              
+Graph embedding learning computes an embedding vector for each                                                 0DULXV                                                                             
+node in a graph and finds many applications in areas such as social                                                *(2                        
+networks, e-commerce, and medicine. We observe that existing                                                      3%*                                                                                                                  
+
+
+
+
+                                                                                              *38V
+graph embedding systems (e.g., PBG, DGL-KE, and Marius) have                                                 '*/.(                                                                    &383URFHVVLQJ
+long CPU time and high CPU-GPU communication overhead, es-                                                     0DULXV 1$                                                                   &38*38&RPPXQLFDWLRQ
+                                                                                                                                                                                                     *38&RPSXWDWLRQ
+pecially when using multiple GPUs. Moreover, it is cumbersome                                                      *(2             
+to implement negative sampling algorithms on them, which have                                                                                                                                                          
+many variants and are crucial for model quality. We propose a new                                                                                                 5XQQLQJ7LPHV
+system called GE2 , which achieves both generality and efficiency
+                                                                                                 Figure 1: Running time decomposition for existing systems
+for graph embedding learning. In particular, we propose a general
+                                                                                                 and GE2 on the Livejournal graph and Dot model. Disk IO
+execution model that encompasses various negative sampling algo-
+                                                                                                 time is excluded for PBG, and Marius only allows 1 GPU.
+rithms. Based on the execution model, we design a user-friendly
+API that allows users to easily express negative sampling algo-
+rithms. To support efficient training, we offload operations from
+CPU to GPU to enjoy high parallelism and reduce CPU time. We
+also design COVER, which, to our knowledge, is the first algo-                                   e-commerce recommendation [43, 50], fraud detection [60], and
+rithm to manage data swap between CPU and multiple GPUs for                                      drug discovery [29, 64]. Graph embedding learning has been ex-
+small communication costs. Extensive experimental results show                                   tensively studied and many algorithms have been proposed, e.g.,
+that, comparing with the state-of-the-art graph embedding systems,                               DeepWalk [37], Node2Vec [11], LINE [44], and SDNE [48]. A num-
+GE2 trains consistently faster across different models and datasets,                             ber of systems have also been developed to train graph embedding
+where the speedup is usually over 2x and can be up to 7.5x. GE2 is                               models, e.g., DGL-KE from Amazon Web Service [68], PyTorch Big
+open-source at https://anonymous.4open.science/r/gege-9030.                                      Graph (PBG) from Meta [24], and Marius [33], but these systems
+                                                                                                 suffer from two crucial limitations.
+KEYWORDS                                                                                         Limited support for negative sampling algorithms. Graph
+Graph processing, graph embedding, machine learning                                              embedding follows the contrastive learning paradigm and pairs
+                                                                                                 real edges in a graph with fake edges to train embeddings. Neg-
+ACM Reference Format:
+                                                                                                 ative sampling decides how to generate these fake edges and is
+Anonymous Author(s). 2018. GE2 : A General and Efficient Knowledge Graph
+Embedding Learning System (Technical Report). In Proceedings of Make                             crucial for the quality of node embeddings [61]. There are many
+sure to enter the correct conference title from your rights confirmation emai                    negative sampling algorithms with diverse patterns. For example,
+(Conference acronym ’XX). ACM, New York, NY, USA, 16 pages. https://doi.                         RNS [40] conducts random sampling, DNS [40] uses node embed-
+org/XXXXXXX.XXXXXXX                                                                              dings to calculate sampling probability, and KBGAN [2] trains a
+                                                                                                 specialized model for sampling. Our experiments in Section 6 show
+1     INTRODUCTION                                                                               that different negative sampling algorithms can yield significantly
+Graph data are ubiquitous in many areas such as social networks [55],                            different embedding quality (usually measured by Mean Reciprocal
+e-commerce [43, 56], finance [3], and medicine [29, 64]. Graph em-                               Rank, MRR). However, the implementations of existing systems
+bedding learning computes an embedding vector for each node in a                                 are tightly coupled with relatively simple negative sampling algo-
+data graph such that similar nodes (e.g., adjacent in the graph or of                            rithms such as RNS, and writing new negative sampling algorithms
+similar type/role) have similar embeddings, and it is one of the most                            takes substantial efforts. For instance, it takes us about 500 lines
+popularly adopted graph machine learning techniques in industry,                                 of code (LoC) to implement KBGAN on DGL-KE and 400 LoC to
+for example, in applications such as community detection [55],                                   implement DNS on Marius. This hinders users from developing and
+                                                                                                 using advanced negative sampling algorithms and thus limits the
+Permission to make digital or hard copies of all or part of this work for personal or            effectiveness of graph embedding models.
+classroom use is granted without fee provided that copies are not made or distributed
+for profit or commercial advantage and that copies bear this notice and the full citation        Poor efficiency for model training. The embeddings are usually
+on the first page. Copyrights for components of this work owned by others than ACM               large (e.g., millions of nodes and one high-dimension vector for
+must be honored. Abstracting with credit is permitted. To copy otherwise, or republish,
+to post on servers or to redistribute to lists, requires prior specific permission and/or a      each node) and do not fit in GPU memory. Thus, they are kept
+fee. Request permissions from permissions@acm.org.                                               primarily on CPU memory and swapped between CPU and GPU to
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY                                          conduct training. In Figure 1, we decompose the running time of
+                                                                                                 existing systems into 3 parts, i.e., CPU processing, CPU-GPU commu-
+© 2018 Association for Computing Machinery.
+ACM ISBN 978-1-4503-XXXX-X/18/06. . . $15.00
+https://doi.org/XXXXXXX.XXXXXXX                                                                  nication, and GPU computation. The results show that these systems
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY                                                                                        Anon.
+
+
+suffer from heavy CPU operations and high CPU-GPU communi-
+cation overhead. In particular, both DGL-KE and Marius transfer
+each batch of training edges and the involved node embeddings to
+GPU for computation, and then write the gradients back to CPU
+for updates. As gradient computation is lightweight on GPU for
+graph embedding models, the edge batching and embedding update
+operations on CPU become dominant. PBG loads the partitions of
+node embeddings to GPU memory and reuses the embeddings to
+train multiple batches. Thus, PBG has smaller CPU and communi-
+cation costs than DGL-KE and Marius when using 1 GPU. However,
+when using 4 GPUs, the CPU and communication costs of PBG in-
+crease rapidly because PBG conducts more fine-grained CPU-GPU             Figure 2: An illustration of graph embedding learning. The
+communication to parallelize among multiple GPUs.                         batch contains two positive edges, and 𝑠 = 2 negative edges are
+   To tackle the generality and efficiency problems of existing graph     sampled for each positive edge. Training pushes the nodes
+embedding systems, we design a system called GE2 . To support             connected by solid lines towards each other and the nodes
+better generality, we conduct an extensive survey of negative sam-        connected by dotted lines apart from each other.
+pling algorithms and classify them into three categories, i.e., static,
+dynamic, and adversarial. On this basis, we propose a general execu-
+tion model that encompasses all these algorithms. In particular, the
+execution model involves 3 steps, i.e., select to generate some initial
+candidates, compute to calculate the sampling bias of the candidates,     • We define the partition scheduling problem for efficient parallel
+and sample to choose the candidates according to their bias. Based          training with multiple GPUs and connect it with the classical
+on the execution model, we design a API to facilitate users to easily       RBIBD problem to design a solution (Section 5).
+express different negative sampling algorithms (e.g., with around         • We conduct comprehensive evaluations of GE2 with on a single
+10 lines of code). We also decouple system implementation from              GPU and multiple GPUs, demonstrating its efficiency compared
+negative sampling algorithms for good generality.                           with existing embedding learning systems (Section 6).
+   To support higher efficiency, we adopt the partition-based train-      • We open-source GE2 , which may benefit research in this com-
+ing scheme of PBG, which loads the partitions of node embeddings            munity: https://anonymous.4open.science/r/gege-9030.
+to GPUs and reuses them across multiple batches. As multi-GPU
+servers become common, we consider scheduling node partition
+swapping between the CPU and multiple GPUs, which we call the             2    BACKGROUND
+partition scheduling problem (PSP). The problem is challenging            In this section, we introduce the background of graph embedding
+because GPUs should exhibit no data conflicts for parallelization,        to provide a foundation for our subsequent discussions.
+have balanced workload to avoid stragglers, and pay small CPU-                In general, graph embedding deals with a data graph in the form
+GPU communication costs for efficiency. To design a solution for          of 𝐺 = (𝑉 , 𝑅, 𝐸), where 𝑉 , 𝑅, and 𝐸 denote the sets of nodes, edge
+PSP, we transform it into the resolvable balanced incomplete block        (i.e., relation) types, and edges, respectively. An edge 𝑒 ∈ 𝐸 is a
+design (RBIBD) problem [20]. Moreover, for a case that is special for     triplet (𝑢, 𝑟, 𝑣), signifying that source node 𝑢 and destination node
+the RBIBD problem but general enough for parallel training, we            𝑣 are linked by relation type 𝑟 . For example, in an e-commerce
+design a simple yet effective algorithm named COVER to solve PSP.         user-product graph, each node represents either a user or a product,
+Compared with the partition swapping strategies of existing sys-          and an edge may indicate user actions such as viewing, clicking, or
+tems, COVER has significantly smaller CPU-GPU communication               purchasing a product. Graph embedding learning aims to learn an
+cost, which is crucial for GE2 to achieve a short training time.          embedding vector 𝜃 𝑣 for every node 𝑣 ∈ 𝑉 , as well as 𝜃𝑟 (or matrix
+   We conduct comprehensive experiments to assess the perfor-             𝑀𝑟 ) for each relation 𝑟 ∈ 𝑅. Typically, the number of relationship
+mance of GE2 comparing with the state-of-the-art graph embedding          types is significantly smaller than the number of nodes, and thus
+systems such as DGL-KE [68], Marius [33], and PBG [24]. The re-           node embedding constitutes the major part of model parameters.
+sults demonstrate that GE2 effortlessly supports various negative         Note that some graphs may lack explicit relations and can be treated
+sampling algorithms and consistently outperforms the baseline             as having only one relation type.
+systems across diverse datasets and graph embedding models. The               Graph embedding employs a score function denoted as 𝑓 (𝜃𝑢 , 𝜃𝑟 , 𝜃 𝑣 )
+speedup obtained by GE2 over the baselines is up to 7.5x and over         to quantify the likelihood of the existence of an edge 𝑒 = (𝑢, 𝑟, 𝑣) in
+2x in the majority of cases. GE2 also achieves higher scalability than    the data graph, and we also use 𝑓 (𝑒) for conscienceless. The func-
+the baselines when using multiple GPUs. Our micro experiments             tion takes various forms, such as 𝜃𝑢⊤𝜃 𝑣 , 𝜃𝑢⊤ diag(𝜃𝑟 )𝜃 𝑣 , or 𝜃𝑢⊤ 𝑀𝑟 𝜃 𝑣 ,
+also further affirm the effectiveness of the GE2 designs.                 depending on the specific graph embedding model [1, 26, 34, 41,
+   To summarize, we make the following contributions.                     45, 58]. Based on their designs, these score functions can encode
+• We conduct an extensive survey of negative sampling algorithms          various similarity semantics, e.g., encouraging nodes adjacent in
+  and design a general execution model along with a user-friendly         the graph topology or nodes with similar roles (e.g., company man-
+  API for their easy expression (Section 4).                              agers) to have similar embeddings. Model training aims to increase
+                                                                          the score 𝑓 (𝑒) for positive edges 𝑒 ∈ 𝐸 and decrease the score 𝑓 (𝑒 ′ )
+GE2 : A General and Efficient Knowledge Graph Embedding Learning System (Technical Report)                                 Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+
+
+                                                                                                                            1 Load       2 Train    3 Dump
+for negative edges 𝑒 ′ ∉ 𝐸. This is achieved by minimizing the fol-
+lowing contrastive loss function:                                                             A
+                                                                                                                      P1                                     2                GE Model
+                                                                                              B
+                 ∑︁                     ∑︁                                                    C
+                                                                                                                      P2
+            L=        (−𝑓 (𝜃 𝑒 ) + log(    exp(𝑓 (𝜃 𝑒 ′ )))).   (1)                           D                                      1         P1
+                                                                                                                                                                 Rel. Embs.
+                                                                                              E
+                   𝑒 ∈𝐸                   𝑒 ′ ∉𝐸                                              F                       P3
+                                                                                                                                     3
+                                                                                                                                               P2
+
+                                                                                              G                                                    Node Embs. Edge Buckets
+                                                                                              H                       P4                                                      Batches
+Training is typically conducted in mini-batches, with each batch
+                                                                                              Node Embeddings                                                       GPU 0
+B containing 𝑏 positive edges. Negative sampling is employed to
+                                                                                                  P1   P2   P3   P4
+generate 𝑠 negative edges for each positive edge 𝑒 = (𝑢, 𝑟, 𝑣). This                         P1                                                              2                GE Model
+process involves replacing the destination node 𝑣 (or, alternatively,                        P2
+
+the source node 𝑢) with fictitious nodes, sampled according to spe-                                                                  1         P3
+                                                                                             P3                                                                  Rel. Embs.
+                                                                                                                                               P4
+cific probabilities. We assume that the destination node is replaced,                        P4                                      3
+                                                                                                  Edge Buckets                                     Node Embs. Edge Buckets
+and the discussions apply to source node replacement. In each                                                                                                                 Batches
+batch, the relevant node embeddings are updated using stochastic                                       CPU                                                          GPU 1
+
+gradient descent. Training is said to have finished an epoch when
+all edges in the train data graph are used once as positive edges.                                     Figure 3: The workflow of the GE2 system.
+    Figure 2 provides an illustrative example of graph embedding
+learning. For this batch, two positive edges, (𝐴, 𝐵) and (𝐸, 𝐹 ), are
+used. Two negative edges are generated for each positive edge, e.g.,                     GE2 considers a machine with sufficient CPU memory and one
+(𝐴, 𝐷) and (𝐴, 𝐺) correspond to positive edge (𝐴, 𝐵) and replace                      or multiple GPUs. The CPU memory holds all data, including graph
+the destination node 𝐵. This batch involves a total of six node                       topology, node embeddings, relation embeddings, and optimizer
+embeddings, i.e., {𝜃 𝐴 , 𝜃 𝐵 , 𝜃 𝐷 , 𝜃 𝐸 , 𝜃 𝐹 , 𝜃𝐺 }, and updates them.              states (e.g., per embedding momentum for SGD variants), while the
+    By generating negative edges for training, negative sampling                      GPUs load their working sets from CPU memory to conduct training
+exerts a substantial influence on the quality of the learned em-                      on demand. GE2 allows users to customize their graph embedding
+beddings [57], which is typically assessed using Mean Reciprocal                      models by specifying the score function and negative sampling
+Rank (MRR) [33, 57] and hit ratio [21, 24, 33]. A plethora of neg-                    algorithm using the API in Section 4. To conduct training, GE2
+ative sampling algorithms have been proposed, such as RNS [40],                       adopts the partition-based scheme in PBG, which loads the node
+DegreeNS [68], DNS [65] and KBGAN [2], and designing novel nega-                      embedding to GPUs at partition granularity and reuses them for
+tive sampling algorithms remains an active area of research [5, 6, 62].               many batches. Different from PBG, GE2 uses the COVER algorithm
+Negative sampling is also widely used in the industry. For example,                   in Section 5 to schedule CPU-GPU data swap, which allows multiple
+Pinterest utilizes the PinSage algorithm to improve recommenda-                       GPUs to parallelize and achieves low CPU-GPU communication
+tion quality, which adopts Personalized PageRank scores to acquire                    cost. In the following, we introduce the data layout and training
+more challenging negative samples [63]. Alibaba designs new neg-                      workflow of GE2 .
+ative sampling algorithms to improve the performance of models                        Node partition and edge bucket. On CPU memory, GE2 organizes
+like DeepWalk and GraphSAGE for e-commerce [61]. However, the                         the node embeddings into node partitions of equal sizes with a range
+implementations of existing graph embedding systems are closely                       partitioning on node ID. For instance, in Figure 3, the graph contains
+intertwined with relatively simple negative sampling algorithms.                      8 nodes, which are organized into 4 partitions (i.e., in the left part
+For instance, the negative sampler of Marius can only access edges                    of Figure 3). According to the node partitions, GE2 organizes the
+while some advanced algorithms (e.g., DNS and KBGAN) need to                          graph topology into edge buckets with each edge bucket containing
+utilize node embeddings. We address this generality challenge by                      the edges from the source partition to the destination. In Figure 3,
+devising a user-friendly API that expresses a wide array of negative                  edge bucket (𝑃1, 𝑃2 ) contains the edges from partition 𝑃1 = {𝐴, 𝐵}
+sampling algorithms and providing a unified execution engine that                     to 𝑃2 = {𝐶, 𝐷 }. This design allows the GPUs to process large graphs
+accommodates these algorithms.                                                        that do not fit in GPU memory and parallelize by handling different
+Relation to graph neural networks (GNNs). GNN models itera-                           node partitions and edge buckets.
+tively aggregate the neighboring nodes and employ neural network                         As illustrated in Figure 3, the training workflow of GE2 consists
+mapping to compute outputs for each node [12, 19, 46]. GNNs are                       of three steps, i.e., load, train, and dump.
+also widely used for graph tasks but they are largely orthogonal                      Load. Each GPU loads some node partitions and the edge buckets
+to graph embedding. In particular, GNNs are usually trained in                        formed by these partitions to prepare for training. For the exam-
+a supervised manner with labels for the nodes and edges while                         ple in Figure 3, GPU-0 loads partitions {𝑃1, 𝑃2 } and the involved
+generating embedding is trained in an unsupervised manner. More-                      edge buckets are (𝑃1, 𝑃1 ), (𝑃1, 𝑃2 ), (𝑃2, 𝑃1 ), (𝑃2, 𝑃2 ). In particular,
+over, graph embedding complements GNNs because GNNs require                           GE2 uses the COVER algorithm in Section 5 to assign a buffer state
+a feature vector for each node and graph embedding can be used to                     S𝑖 = {𝑃1𝑖 , 𝑃2𝑖 , · · · , 𝑃𝑞𝑖 } for each GPU, which contains 𝑞 partitions and
+generate these features vectors for GNN training.                                     determines the data to load. The relation embeddings are loaded
+                                                                                      by all GPUs, and this is necessary because the edge buckets may
+3    GE2 SYSTEM OVERVIEW                                                              contain all relation types. Such repetitive loading is not expensive
+In this section, we provide an overview of our GE2 system and                         because the relation embeddings are usually much smaller than the
+introduce its procedure for training graph embedding models.                          node embeddings. The optimizer states of the embeddings are also
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY                                                                                                  Anon.
+
+
+Table 1: A summary of negative sampling algorithms, which sample a node 𝑣 ′ to replace the destination node 𝑣 for an edge
+𝑒 = (𝑢, 𝑟, 𝑣). Candidate prepares some nodes for bias computation, and Bias controls how these nodes are sampled.
+
+           Category        Candidate         Bias          Example Algorithm                                    Description
+                                              No                 RNS [40]                Sample nodes uniformly at random
+             Static            No           Degree             DegreeNS [68]             Sample nodes using their degrees as bias
+                                          Frequency       UINS [35], Word2vec [32]       Sample nodes using an external bias
+                                                                                         First select some nodes nearest to the source node in the em-
+                            Neighbor          No                TUNS [42]
+                                                                                         bedding space and then sample uniformly
+           Dynamic
+                                                           DNS [65], MaxNS [38],         Uniformly sample some nodes and then sample these candi-
+                            Random           Score
+                                                                 SRNS [4]                dates according to their scores for the source node
+                                                             GraphGAN [49],              Train another embedding (i.e., generator) for each node and
+                               No
+          Adversarial                        Model        IRGAN [51], AdvIR [36]         sample based on generator scores for source node
+                            Random                              KBGAN [2]                Uniformly sample nodes and then use the generator
+
+
+loaded such that updates can be conducted on the GPUs. GE2 uses                      without synchronization during the train step. After each pass of
+separate threads to conduct parallel loading for different GPUs.                     the load, train, and dump steps, the latest relation embeddings are
+Train. Each GPU permutes the edges in its loaded edge buckets and                    computed as the average of the relation embeddings on all GPUs.
+goes over the edges with a batch size of 𝑏 to conduct training. For                     GE2 has several advantages over existing systems. In particular,
+each positive edge 𝑒 = (𝑢, 𝑟, 𝑣), 𝑠 negative edges are sampled, and                  DGL-KE and Marius batch the edges and update the node embed-
+we constrain that each GPU samples the fake destination nodes 𝑣 ′                    dings on CPU, and conduct CPU-GPU communication for each
+among the nodes in its buffer state S𝑖 . This ensures that the GPUs                  batch, yielding long CPU processing time and high CPU-GPU com-
+do not read node embeddings from CPU or peer GPU memory in                           munication cost. GE2 reduces CPU time by offloading edge batching
+the training step. Such a constraint limits the range of fake destina-               and negative sampling to the GPUs. The CPU-GPU communication
+tions but we observe that it does not affect model quality. This is                  cost is also reduced by only loading and dumping the node embed-
+because each GPU loads many node embeddings (e.g., one million),                     dings after processing some edge buckets, which are much larger
+and sampling among these nodes already provides sufficient ran-                      than a batch of edges. PBG also adopts the partition-based training
+domness. Similar constraints are also imposed by PBG and Marius.                     strategy but GE2 ’s COVER algorithm achieves lower CPU-GPU
+The COVER algorithm ensures that different GPUs handle separate                      communication cost, especially when using multiple GPUs.
+node partitions, and thus the GPUs can update their node embed-                         Currently, GE2 assumes that all data fit in the CPU memory of a
+dings without synchronization. For the relation embeddings, the                      single machine, which can easily reach 512GB or 1TB nowadays and
+GPUs synchronize after every batch using an all-reduce operation                     allows to handle reasonably large graphs. For example, assume that
+because they may update the same relation embeddings.                                a machine has 512GB memory and each node embedding is a 128-
+                                                                                     dimensional float vector, single machine in-memory processing can
+Dump. After processing their respective edge buckets, the GPUs                       handle a graph with 500 million nodes, which is sufficiently large
+dump the node embeddings and optimizer states to CPU memory.                         for most applications. Moreover, cloud vendors provide machines
+As each GPU handles separate node partitions, there are no write-                    with up to 4 TB of memory, which allow to handle even larger
+write conflicts, and thus locks are not required during dumping.                     graphs (e.g., with 1 billion nodes). Similar to GE2 , systems such as
+   Multiple passes of the load, train, and dump steps may be re-                     DGL-KE [68], GraphVite [69], and HET [31] also consider graph
+quired to go over all the edge buckets (i.e., an epoch). After the                   embedding learning in the main memory. Extending GE2 to disk-
+dump step of one pass, the load step of the next pass can start,                     based and distributed training requires to consider disk-memory
+with each GPU handling a buffer state (and thus edge buckets) that                   data swapping and data partitioning over the machines, which we
+is different from the previous pass. The relation embeddings are                     leave for future work.
+only loaded in the first pass and dumped in the final pass because
+they are used in all passes. For diagonal edge buckets in the form
+of (𝑃 𝑗 , 𝑃 𝑗 ), GE2 processes them the first time when partition 𝑃 𝑗 is             4     A GENERAL API FOR NEGATIVE SAMPLING
+loaded into GPU memory and ignores them when 𝑃 𝑗 is loaded later.                    In this section, we first summarize existing negative sampling al-
+To introduce more randomness, we reorganize the nodes into node                      gorithms, then propose a general API for implementing these al-
+partitions after each epoch. This is done by permuting the nodes to                  gorithms by identifying their common computation patterns, and
+generate new node IDs, which is a very cheap operation.                              finally show how to use the API to express some representative
+   We observe that the cost of synchronizing the relation embed-                     algorithms.
+dings in every mini-batch can be large, and thus we design GE2 to
+allow users to configure a delayed update option to reduce this cost.                4.1    Negative Sampling Algorithms
+Specifically, delayed update resembles the federated averaging algo-
+                                                                                     For each positive edge 𝑒 = (𝑢, 𝑟, 𝑣), negative sampling chooses
+rithm [30], where each GPU updates its local relation embeddings
+                                                                                     a fake destination node 𝑣 ′ to replace 𝑣 according to a sampling
+GE2 : A General and Efficient Knowledge Graph Embedding Learning System (Technical Report)                   Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+
+
+distribution 𝑃 (𝑣 ′ |𝑢, 𝑟 ) (i.e., bias). There are many negative sampling                Algorithm 1: The SCS model for negative sampling algo-
+algorithms, and we summarize 12 representatives in Table 1. In                            rithms
+particular, we classify the algorithms into three categories based                          Input: edge batch B, negative sample number 𝑠
+on how the sampling distribution is computed, i.e., static, dynamic,                        Output: negative edges M
+and adversarial.                                                                         1 for each postive edge 𝑒 ∈ B do
+
+Static algorithms. For these algorithms, the sampling bias does                          2     Get the candidate nodes C using SELECT(𝐾);
+not change during training. For instance, RNS conducts unbiased                          3     Calculate the sample bias P by COMPUTE(𝑒, C);
+sampling and chooses the nodes uniformly at random [40], and De-                         4     Sample 𝑠 negative edges by SAMPLE(P, 𝑠) for M;
+greeNS uses node degree as the sampling bias [68]. Some algorithms
+sample the nodes according to their external frequency outside the
+data graph. For example, UINS considers recommendation and uses
+                                                                                     1 // Core functions
+the view count of user/item as bias [35], and Word2vec targets                       2 Vector < Node > select ( int K , int group_num = 0);
+natural language and uses word appearance count as bias [32]. For                    3 Bias compute ( Edge e , Vector < Node > nodes );
+static algorithms, shared sampling is a popular technique to im-                     4 Vector < Node > sample ( Bias bias , int s );
+prove efficiency, which organizes a batch of positive edges into                     5 // Auxiliary structures and functions
+                                                                                     6 class Bias {
+𝑔 groups (with 𝑔 much smaller than batch size 𝑏) and shares the
+                                                                                     7     Vector < Node > nodes , Vector < float > probs };
+negative destinations in each group. This reduces both the negative                  8 enum EmbeddingType { Generator , Discriminator };
+destinations to sample and the node embeddings to update.                            9 Embedding getEmbeddings ( Vector < Node > nodes ,
+                                                                                    10                              EmbeddingType type );
+Dynamic algorithms. These algorithms compute sampling bias
+                                                                                    11 Vector < float > score ( Embedding emb ,
+using the node embeddings, which change dynamically during                          12                            Vector < Embedding > embs );
+training. For example, TUNS first identifies 𝐾 nodes that are the
+closest to the source node in the embedding space and then sam-
+                                                                                                      Figure 4: API for negative sampling.
+ples these nodes uniformly at random [42]. To avoid computing
+the distance/score for all nodes, some algorithms first sample a
+subset of the nodes uniformly at random and then compute the
+scores 𝑓 (𝜃𝑢 , 𝜃𝑟 , 𝜃 𝑣 ′ ) of these candidates for the source node. They                systems focus on static negative sampling algorithms (e.g., RNS)
+sample the candidates in different ways, e.g., MaxNS [38] chooses                        and require considerable effort to implement other algorithms.
+candidates with the largest scores while DNS [65] and SRNS [4]
+sample the candidates with probability proportional to their scores.                     4.2    Execution Model and API
+Adversarial algorithms. Inspired by generative adversarial net-                          We observe that negative sampling algorithms (e.g., those in Ta-
+works (GANs) [10], these algorithms train another embedding 𝜃˜𝑣 for                      ble 1) follow a general 3-step procedure with select, compute, and
+each node 𝑣 to conduct sampling. This sampling-oriented model is                         sample, which is summarized in Algorithm 1. In particular, for a
+called the generator, while the graph embedding model is called the                      positive edge 𝑒, the select step generates 𝐾 candidate nodes, e.g.,
+discriminator. The idea is that a specialized generator can learn to                     the random sampling in DNS [65] and KBGAN [2] or the nearest
+produce high-quality negative edges for training. GraphGAN [49],                         neighbors in TUNS [42]; the compute step calculates the sampling
+IRGAN [51], and AdvIR [36] sample the destination node 𝑣 ′ accord-                       bias of the candidates for the positive edge, e.g., using the node em-
+ing to the scores 𝑓˜(𝜃˜𝑢 , 𝜃˜𝑟 , 𝜃˜𝑣 ′ ) given by the generator. KBGAN [2]               beddings in MaxNS [61] and SRNS [4] or another generator model
+avoids computing the scores for all nodes by uniformly sampling                          in GraphGAN [49] and KBGAN [2]; the sample step chooses 𝑠 des-
+some nodes before applying the generator model.                                          tination nodes among the 𝐾 candidates according to the bias, e.g.,
+   We observe that negative sampling algorithms are becoming in-                         sampling those with the largest scores in MaxNS [61] or conducting
+creasingly diverse and complex. For instance, the static algorithms                      probabilistic sampling in GraphGAN [49]. Some algorithms may
+are proposed the earliest but later the dynamic and adversarial                          skip certain steps, for instance, the static algorithms do not conduct
+algorithms become more compute-intensive. There are also hybrid                          the select step and compute step. Regarding Table 1, the select step
+and more complex algorithms. For example, MCNS [61] selects                              corresponds to column Candidate, the compute step corresponds to
+both uniformly sampled nodes and nearest neighbors as candidates                         column Bias, and the sample step finally decides the negative node.
+and then samples these candidates using the Metropolis-Hastings                             Based on the above execution model for negative sampling, we
+algorithm. Rather than sampling existing nodes, MixGCF [16] syn-                         design the C++ style API in Figure 4. The API has three core func-
+thesizes hard negatives by mixing the embeddings of uniformly                            tions that correspond to the three steps of negative sampling. In
+sampled candidates and their 𝐿-hop neighbors. Although simple                            particular, the select function accepts 𝐾 as the number of candi-
+negative sampling algorithms can improve accuracy by sampling                            dates to generate and returns a list of node IDs. Users can control
+more negatives for each positive edge, they usually yield lower                          the number of groups in a batch with the group_num parameter for
+model accuracy than complex algorithms [61], and using more neg-                         shared sampling (see Section 2), which is disabled if group_num=0.
+atives also increases training computation. As such, it is crucial to                    The compute function takes the positive edge 𝑒 and the candidate
+provide system support for the easy implementation of complex                            nodes as input and returns bias, which is a list that contains the
+negative sampling algorithms. However, existing graph embedding                          candidates and their probabilities to be sampled. The sample func-
+                                                                                         tion accepts the bias and the number 𝑠 of candidates to sample. We
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY                                                                                                 Anon.
+
+
+provide two built-in options for sample, i.e., sampling the candi-        1 Vector < Node > sample ( Bias bias , int s ) {
+dates with top scores (i.e., TopSample) and sampling the candidates       2     return ProbSample ( bias , s );
+                                                                          3 }
+by normalizing their bias into a distribution (i.e., ProbSample). De-     4 Bias bias = Uniform ( subgraph . nodes );
+composing negative sampling into three steps yields clear algorithm       5 Vector < Node > results = sample ( bias , s );
+logic and enables effective code reuses. For instance, several algo-                                             (a) RNS
+rithms in Table 1 use uniform sampling for candidate generation
+and TopSample or ProbSample for node sampling, and we provide             1 Vector < Node > select ( int K ) {
+
+these methods in GE2 to reduce user efforts. Although many algo-          2     return ProbSample ( Uniform ( subgraph . nodes ) , K );
+                                                                          3 }
+rithms use uniform sampling for candidate generation, we leave the        4 Bias compute ( Edge e , Vector < Node > nodes ) {
+select API for users to specify more sophisticated candidate gener-       5         emb = getEmbeddings ( e . src );
+ation methods, which is required for algorithms such as TUNS.             6         embs = getEmbeddings ( nodes );
+   The API provides two auxiliary functions that are useful for dy-       7         return Bias ( nodes , score ( emb , embs ));
+                                                                          8 }
+namic and adversarial algorithms. getEmbeddings accepts a list of
+                                                                          9 Vector < Node > sample ( Bias bias , int s ) {
+node IDs and returns the embeddings of these nodes produced by            10     return TopSample ( bias , s );
+the generator model or the discriminator model. Users can also de-        11 }
+fine multiple score functions that evaluate the score of an edge (e.g.,   12 Vector < Node > candidates = select ( K );
+                                                                          13 Bias bias = compute (e , candidates );
+for discriminator and generator), which will be used to compute
+                                                                          14 Vector < Node > results = sample ( bias , s );
+the sampling bias. As GE2 loads some node embedding partitions
+                                                                                                                 (b) DNS
+to each GPU to conduct training, the select and getEmbeddings
+functions only consider the local nodes on each GPU. Such a limit         1 Bias compute ( Edge e , Vector < Node > nodes ) {
+on the domain of negative sampling does not hinder model quality          2     type = EmbeddingType :: Generator ;
+because each GPU holds many nodes and thus provides sufficient            3         emb = getEmbeddings ( e . src , type );
+                                                                          4         embs = getEmbeddings ( nodes , type );
+randomness for sampling [24]. Users can also utilize the operators
+                                                                          5         return Bias ( nodes , score ( emb , embs ));
+and functions in LibTorch1 .                                              6 }
+                                                                          7 Vector < Node > sample ( Bias bias , int s ) {
+4.3     Use Cases of the API                                              8         return ProbSample ( bias , s );
+                                                                          9 }
+   Our execution model and API are relatively simple, in this part,
+                                                                                                               (c) KBGAN
+we show that such simplicity leads to succinct expressions of nega-
+tive sampling algorithms using RNS, DNS, and KBGAN as examples.
+RNS randomly samples nodes and represents the static algorithms.              Figure 5: Use our API to write negative sampling algorithms.
+As shown in Figure 5a, we bypass the select and compute func-                 The select function of KBGAN is the same as DNS.
+tions and create a uniform bias (whose probabilities are all 1) for
+all nodes in the sub-graph (formed by the edge buckets loaded on
+one GPU). Then the sample function uniformly samples 𝑠 nodes
+from the sub-graph.                                                           5     PARTITION SWAPPING SCHEDULING
+                                                                              In this section, we first define the partition scheduling problem (PSP),
+DNS uses the scores of the candidate nodes as sampling bias and
+                                                                              which determines how GPUs load and dump the node embedding
+represents the dynamic algorithms. As shown in Figure 5b, the
+                                                                              partitions to conduct training in GE2 . Next, we transform the PSP
+select function uniformly chooses 𝐾 nodes from the sub-graph
+                                                                              problem into the resolvable balanced incomplete block design (RBIBD)
+as candidates. The compute function uses the getEmbeddings to
+                                                                              problem [20], which is an extensively researched problem, to ensure
+obtain the embedding of the source node of the positive edge and
+                                                                              that our solution inherits the favorable properties of RBIBD. Finally,
+the embeddings of the candidates. Then, the score function is used
+                                                                              we introduce a simple yet effective solution construction algorithm
+to compute the scores of the candidates for the source node. Finally,
+                                                                              called COVER to solve the PSP problem.
+the sample function calls the TopSample function to return the 𝑠
+nodes with highest scores among the candidates.
+KBGAN uses the scores predicted by the generator model and
+                                                                              5.1     Problem Definition and Requirements
+represents the adversarial algorithms. In Figure 5c, the compute              Recall that in GE2 , each GPU loads a buffer state S𝑖 = (𝑃1𝑖 , 𝑃2𝑖 , · · · , 𝑃𝑞𝑖 )
+and select functions for KBGAN are similar to those for DNS in                (referred to as state for conciseness), which contains a maximum
+Figure 5b, except that KBGAN uses the embeddings produced by                  of 𝑞 node partitions, and processes the edge buckets formed by
+the generator model.                                                          these partitions. Thus, we say that a buffer state covers the edge
+   Our API can also implement hybrid algorithms. For instance, a              buckets it induces. To coordinate multiple GPUs to load and dump
+hybrid of RNS and DegreeNS is widely used, which samples half of              the buffer states, we need to specify all the involved buffer states.
+the negatives using RNS and half of the negatives using DegreeNS.
+We can modify lines 2 and 4 in Figure 5a to conduct DegreeNS and                 Definition 1 (partition scheduling problem, PSP). Given
+merge the sampling results of RNS and DegreeNS.                               the total number of node partitions 𝑝 and the number of node partition
+                                                                              in a buffer state 𝑞, determine a set of buffer states S = {S1, S2 · · · S𝐼 }
+1 https://pytorch.org/cppdocs                                                 that collectively cover all edge buckets.
+GE2 : A General and Efficient Knowledge Graph Embedding Learning System (Technical Report)                Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+
+
+   The buffer states in S must cover all edge buckets in order to                       Algorithm 2: The COVER Algorithm
+carry out a complete epoch of training. While there exist numer-
+                                                                                       1 Input: the number of node partitions 𝑝 (𝑝 = 4𝐿 ), and the
+ous solutions to the PSP, a high-quality solution should meet the
+                                                                                          number of partitions in a buffer state 𝑞 (𝑞 = 4)
+following three criteria.
+                                                                                       2 Output: the set S of all buffer states
+Independent groups. In GE2 , multiple GPUs are employed to                             3 Bucket set E ← [(1, 1), · · · , (1, 𝑝), (2, 1), · · · , (𝑝, 𝑝)]
+process distinct buffer states simultaneously. Buffer states processed                 4 Buffer state set S ← ∅
+concurrently should not share common node partitions; otherwise,
+                                                                                       5 while Bucket set E larger than 𝑝 do
+different GPUs may update the same node embeddings, which
+                                                                                       6    Node partition set P ← [1, 2, · · · , 𝑣]
+necessitates synchronization in every batch. We say that a set of
+                                                                                            State group G ← ∅
+buffer states form an independent group if their node partitions have
+                                                                                       7
+
+no overlap. For instance, in Figure 3, buffer states S1 = {𝑃1, 𝑃2 }                    8    while Node partition set P not empty do
+and S2 = {𝑃3, 𝑃4 } constitute an independent group and can be                          9        Buffer state SΔ ← ∅
+processed in parallel. When there are 𝐺 GPUs, the buffer states in                    10        while Buffer state size |SΔ | < 𝑞 do
+S should be from independent groups whose size is a multiple of 𝐺.                    11           Find the first partition 𝑃 𝑗 in P such that all edge
+This enables the GPUs to process buffer states of an independent                                    buckets formed by 𝑃 𝑗 and SΔ are in E
+group in parallel without synchronizing node embedding.                               12           Remove 𝑃 𝑗 from P and add 𝑃 𝑗 to SΔ ;
+                                                                                      13        Remove all edge bucket covered by SΔ from E except
+Balanced workload. In GE2 , GPUs load buffer states, conduct
+                                                                                                 the edge bucket on diagonal
+training, and subsequently dump the buffer states to CPU in rounds.
+                                                                                      14        Add SΔ to G
+Node partitions processed by one GPU in the current round may
+be required by other GPUs in the subsequent round. In such cases,                     15    Add G to S
+                                                                                      16 return Buffer state set S
+the GPUs must wait for the slowest GPU to complete its process-
+ing, which causes wasteful waiting. Therefore, to ensure balanced
+workload among the GPUs, all buffer states should cover the same
+number of edge buckets2 .                                                             specify an RBIBD problem by 𝑅𝐵𝐼𝐵𝐷 (𝑤, 𝑘, 𝜆). We transform our
+Non-overlapping buckets. To attain high efficiency, GE2 should                        PSP problem into an RBIBD problem and show that the require-
+have a low CPU-GPU communication volume for loading and dump-                         ments in Section 5.1 are satisfied as follows:
+ing node partitions. Communication cannot be further reduced                          • Our node partitions correspond to the objects, and our buffer
+when each edge bucket is covered by only one buffer state.3 This                        states correspond to the blocks. Thus, we have 𝑤 = 𝑝 and 𝑘 = 𝑞,
+is because, in this case, if we remove one node partition from a                        and can map a solution of RBIBD to our PSP problem.
+buffer state to reduce communication, the set of buffer states would                  • By setting 𝜆 = 1, the concomitant property of RBIBD ensures
+no longer be able to cover all the edge buckets. Conversely, if two                     that every two distinct objects occur together in 1 block, and
+buffer states cover a common edge bucket, it may result in the waste                    thus each edge bucket is covered by only one buffer state.
+of data IO and training computation.                                                  • The concomitant and balanced properties of RBIBD indicate that
+                                                                                        all buffer states cover the same number of edge buckets, i.e.,
+5.2     Connection to The RBIBD Problem                                                 𝑞(𝑞 − 1). Thus, the workloads of the GPUs are balanced.
+It is challenging to design an algorithm that solves the PSP problem                  • The resolvable property of RBIBD ensures that each of the 𝑡
+and satisfies the requirements above. However, we observe that                          groups of blocks do not contain common objects. Thus, each
+our PSP problem can be converted into the RBIBD problem [20] in                         group of buffer states do not contain common node partitions
+combinatorial mathematics.                                                              and form an independent group for multiple GPU training.
+  Definition 2 (RBIBD problem). The resolvable balanced in-                              Theorem 1. Given 𝑝 node partitions and that each buffer state
+complete block design (RBIBD) problem is to find an arrangement of                    contains 𝑞 node partitions, the partition scheduling problem, PSP(𝑝, 𝑞),
+𝑤 distinct objects into ℎ blocks with the following properties:                       can be solved via the RBIBD problem as RBIBD(𝑝, 𝑞, 1).
+• Balanced: each block contains exactly 𝑘 distinct objects, and each
+                                                                                         Corollary 1. Using the solution produced by RBIBD(𝑝, 𝑞, 1), the
+  object occurs in exactly 𝑡 different blocks;
+                                                                                      number of buffer states in each independent group is 𝑝/𝑞, and there
+• Concomitant: every two distinct objects occur together in 𝜆 blocks;                 are (𝑝 − 1)/(𝑞 − 1) such independent groups.
+• Resolvable: the blocks can be divided into 𝑡 groups such that the
+  blocks in each group is a complete replication of all the objects.                     Proof. With 𝑤𝑟 = ℎ𝑘 and 𝑡 (𝑘 − 1) = 𝜆(𝑣 − 1) for the RBIBD
+                                                                                      problem and setting 𝜆 = 1, the number of block groups is 𝑡 =
+   An RBIBD problem is specified by its parameters (𝑤, ℎ, 𝑡, 𝑘, 𝜆). If                (𝑤 − 1)/(𝑘 − 1), and the number of blocks in each group is ℎ/𝑡 =
+the problem has solutions, we have 𝑤𝑟 = ℎ𝑘 and 𝑡 (𝑘 −1) = 𝜆(𝑤 −1).                    (𝑤𝑡/𝑘)/𝑟 = 𝑤/𝑘. Substituting 𝑣 = 𝑝 and 𝑘 = 𝑞, we obtain the
+Thus, there are only three independent parameters, and we can                         results.                                                       □
+2 Different edge buckets contains a similar number of edges because we randomly
+                                                                                         The corollary demonstrates that, to ensure that the size of the
+assign the nodes to node partitions and each node partition contains many nodes.
+Thus, we use the number of edge buckets to quantify workload.                         independent buffer state group is a multiple of the number of GPUs,
+3We exclude the diagonal edge buckets here and in subsequent discussions.             we need to set 𝑝 and 𝑞 properly.
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY                                                                                                              Anon.
+
+
+
+
+          (a) Group 1                      (b) Group 2                      (c) Group 3                       (d) Group 4                         (e) Group 5
+
+Figure 6: The buffer states generated by the COVER algorithm when 𝑣 = 16 and 𝑘 = 4. In a group, we mark the edge buckets
+covered by different buffer states with different colors and the edge buckets covered in the previous groups with gray color.
+The buffer states can be obtained by reading squares with the same color along an axis of the matrix. For instance, in group 1,
+the 4 buffer states are {𝑃1 , 𝑃2 , 𝑃3 , 𝑃4 }, {𝑃5 , 𝑃6 , 𝑃7 , 𝑃8 }, {𝑃9 , 𝑃10 , 𝑃11 , 𝑃 12 }, and {𝑃13 , 𝑃14 , 𝑃15 , 𝑃 16 }. In group 2, the 4 buffer states are {𝑃1 ,
+𝑃5 , 𝑃9 , 𝑃13 }, {𝑃2 , 𝑃6 , 𝑃10 , 𝑃14 }, {𝑃3 , 𝑃7 , 𝑃 11 , 𝑃15 }, and {𝑃 4 , 𝑃 8 , 𝑃 12 , 𝑃 16 }. After 5 groups, all the edge buckets are covered.
+
+
+5.3     The COVER Algorithm                                                                The innermost loop (Lines 10-12) adds node partitions to an
+To solve RBIBD(𝑝, 𝑞, 1) to obtain all the buffer states, the values of                empty buffer state SΔ until SΔ contains 𝑞 partitions. In each itera-
+𝑝 and 𝑞 need to be specified. We advocate 𝑝 = 4𝐿 (with 𝐿 being a                      tion, Algorithm 2 chooses the first partition 𝑃 Δ such that the edge
+positive integer) and 𝑞 = 4 for the following reasons.                                buckets covered by 𝑃 Δ and SΔ are in the remaining edge bucket
+                                                                                      set E (Line 11). Once a buffer state SΔ is constructed, the edge
+• RBIBD(𝑝, 𝑞, 1) may not have solutions in general cases, and the
+                                                                                      buckets it covers are removed from the edge bucket set E (Line
+  sufficient conditions for solution existence are still unclear [13,
+                                                                                      13). This ensures that any two buffer states do not cover the same
+  14, 39]. However, it is shown that RBIBD(𝑝, 𝑞, 1) can be solved
+                                                                                      edge buckets. One subtlety is that we do not remove diagonal edge
+  with 𝑝 ≡ 4(𝑚𝑜𝑑 12) and 𝑞 = 4. Note that 𝑝 = 4𝐿 and 𝑞 = 4 belong
+                                                                                      buckets of the form (𝑃 𝑗 , 𝑃 𝑗 ) from E in Line 13, and this allows
+  to this case as 𝑚𝑜𝑑 (4𝐿 , 12) = 4.
+                                                                                      Algorithm 2 to add the first edge bucket to an empty buffer state SΔ
+• In practice, the number of GPUs used for training (denote as 𝐺)                     after generating the first group. As a result, in Line 5, the outermost
+  is usually a power of two (e.g., 1, 2, 4, and 8), and the number of                 loop can terminate when the number of remaining edge buckets in
+  buffer states in an independent group (i.e., 𝑝/𝑞) needs to be an                     E is 𝑝 because only the 𝑝 diagonal edge buckets remain. Note that
+  integer multiple of 𝐺. We note that 𝑝 = 4𝐿 and 𝑞 = 4 meet this                      the diagonal edge buckets are already covered by the first group
+  condition because the size of an independent group is 4𝐿−1 .                        (i.e., when each partition is loaded to GPU memory for the first
+• We can flexibly configure 𝐿 such that the 4 node partitions in                      time). Thus, Algorithm 2 ensures that all edge buckets are covered.
+  a buffer state fit in GPU memory. In particular, denote GPU                         The correctness of Algorithm 2 is proved in Appendix A.
+  memory capacity as 𝐶, the number of graph nodes as 𝑁 , and                               We provide an example of the buffer states generated by Algo-
+  embedding dimension as 𝑑, we have                                                   rithm 2 in Figure 6 with 𝑝 = 16 and 𝑞 = 4. We observe that each
+                                                                                      group contains 4 buffer states that collectively enumerate all node
+                                                                                      partitions, and the 5 groups cover all edge buckets. In particular,
+                      4 × 𝑁𝑑/𝑝 = 4 × 𝑁𝑑/4𝐿 ≤ 𝐶,                            (2)        the buffer states in the first group are {𝑃1 , 𝑃2 , 𝑃3 , 𝑃 4 }, {𝑃5 , 𝑃6 , 𝑃 7 , 𝑃8 },
+                                                                                      {𝑃9 , 𝑃10 , 𝑃11 , 𝑃12 }, and {𝑃 13 , 𝑃14 , 𝑃15 , 𝑃16 }. Thus, after adding 𝑃1 to
+                   √︁
+  which gives 𝐿 = ⌈ 4 4𝑁𝑑/𝐶⌉.                                                         SΔ = ∅ in the second group, we cannot add 𝑃 2 , 𝑃3 and 𝑃4 to SΔ as
+                                                                                      the induced edge buckets are already covered by the buffer state
+   There exist solutions to our RBIBD problem [14] but they involve                   {𝑃 1 , 𝑃 2 , 𝑃 3 , 𝑃4 } in the first group. 𝑃5 is the first partition that satisfies
+sophisticated techniques including abstract algebra, design theory,                   Line 11 of Algorithm 2, and thus SΔ = {𝑃1, 𝑃5 }. Considering 𝑃 1 and
+combinatorics, and group theory, which are difficult to understand                    𝑃5 , the first qualified partition is 𝑃9 ; considering 𝑃1 , 𝑃5 and 𝑃9 , the
+and implement. As such, we propose a simple yet effective algo-                       partition to add is 𝑃 13 . Finally, the first buffer state of group 2 is
+rithm, called COVER, which adopts a greedy strategy to cover edge                     SΔ = {𝑃1, 𝑃5, 𝑃9, 𝑃13 }. Similarly, we can obtain the other 3 buffer
+buckets, which is shown in Algorithm 2. In particular, Algorithm 2                    states of group 2 as {𝑃2 , 𝑃 6 , 𝑃10 , 𝑃14 }, {𝑃3 , 𝑃7 , 𝑃11 , 𝑃15 }, {𝑃 4 , 𝑃8 , 𝑃12 ,
+first initializes the set E of all edge buckets in Line 3. It then uses               𝑃16 }. The other 3 groups can be obtained in a similar manner.
+three while loops to construct the buffer states. For the outermost
+loop (Lines 5-15), Algorithm 2 initializes the set of all node parti-                 Discussions. Table 2 compares the communication volume of em-
+tions P and tries to assign the partitions to buffer states. Once a                   bedding swapping for different systems. 𝑁 and 𝐸 are the number of
+partition is assigned to a buffer state, it is removed from the current               nodes and edges in the data graph, 𝑑 is the embedding dimension,
+partition set P (Line 12). This ensures that the buffer states in a                   𝑝 is the number of node partitions, and 𝐺 is the number of GPUs.
+state group G do not share common node partitions, and thus the                          DGL-KE organizes each batch of edges for training on CPU and
+buffer states in G form an independent group and can be processed                     transfers them to GPU. Each positive edge needs 𝑠 negative edges,
+in parallel.                                                                          one edge involves 2 node embeddings, and an epoch goes over 𝐸
+GE2 : A General and Efficient Knowledge Graph Embedding Learning System (Technical Report)                      Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+
+
+Table 2: Communication volume in an epoch for different                                 Table 3: Statistics of the datasets used in the experiments
+embedding swapping strategies, 𝑝 is the number of partitions
+and 𝐺 is the number of GPUs. The last column assumes 𝑝 =                                           𝐺                 |𝑉 |          |𝐸|        |𝑅|    Dim.   Emb. Size
+𝑞𝐺 and serves as lower bound.
+                                                                                             Livejournal (LJ)      4.8M        68.9M           -     100      3.8G
+
+           Strategy              Communication Communication                                  Twitter (TW)         41.6M       1.46B           -     100      32G
+                                     volume       lower bound                            Freebase86M (FB)          86.0M      304.7M         14824   100      66G
+    CPU Batch (DGL-KE)             2𝐸 (𝑠 + 1)𝑑       2𝐸 (𝑠 + 1)𝑑                             Wiki90M (WK)          91.2M      601.0M         1387    80       56G
+       Hilbert (PBG)              𝐺 · 𝑝 · 𝑁 · 𝑑/2    𝐺2 · 𝑁 · 𝑑
+      BETA (Marius)               𝐺 · 𝑝 · 𝑁 · 𝑑/6 2 · 𝐺 2 · 𝑁 · 𝑑/3
+      COVER (Ours)                 𝑝 · 𝑁 · 𝑑/3    4 · 𝐺 · 𝑁 · 𝑑/3                     node embeddings, and Emb. Size is the total size of all node and
+                                                                                      relation embeddings. Among the four graphs, Livejournal 4 and Twit-
+                                                                                      ter 5 are social networks without relations, and Freebase86m6 and
+positive edges. Thus, the communication volume is 2𝐸 (1 + 𝑠)𝑑. PBG                    Wiki90m7 are knowledge graphs with relations. The four graphs
+uses the classical Hilbert ordering [15], which keeps 2 partitions in                 are publicly available and widely used to evaluate graph embedding
+GPU memory and swaps one partition each time to process one new                       learning algorithms and systems. Following Marius [33], we split
+edge bucket. The communication volume is (𝑝 ∗𝑁 ∗𝑑)/2 when using                       the edges of each graph into training, validation, and test subsets
+a single GPU. To utilize 𝐺 GPUs, PBG divides each partition into                      with proportions of 90%, 5%, and 5%, respectively. We used various
+𝐺 smaller partitions and parallelizes different edge buckets among                    score functions and negative sampling algorithms to evaluate the
+the GPUs, and thus the communication volume increases with the                        systems. As Livejournal and Twitter do not have relations, we used
+number of GPUs. Targeting at disk-based training, Marius designs                      the popular Dot model [25], whose score function is 𝜃𝑢⊤𝜃 𝑣 and does
+the BETA algorithm to exchange partitions between CPU and disk                        not involve relation type. Freebase86m and Wiki90m have relations,
+but we also include it in the analysis by treating CPU and disk as                    and thus we used DistMult [58] and ComplEx [45], whose score
+GPU and CPU, respectively. In particular, BETA keeps 𝑞 partitions                     functions are 𝜃𝑢⊤ diag(𝜃𝑟 )𝜃 𝑣 and Real(𝜃𝑢⊤ diag(𝜃𝑟 )𝜃 𝑣∗ ), respectively.
+in memory and swaps a single partition to process 𝑞−1 edge buckets                    Note that ComplEx learns embeddings with complex values, and
+each time. The communication volume is (𝑝 ∗ 𝑁 ∗ 𝑑)/6 when using                       𝜃 𝑣∗ means the element-wise conjugate of vector 𝜃 𝑣 . For the negative
+a single GPU and 𝑞 = 4. However, BETA does not consider multiple                      sampling algorithm, we used a hybrid of RNS and DegreeNS [68]
+GPUs, which is challenging because different GPUs should not                          when comparing with existing systems because they only support
+access the same node partitions. If the method of PBG is used to                      static algorithms and this hybrid is shown to produce quality node
+parallelize multiple GPUs, the communication volume of BETA also                      embeddings. However, we also evaluated GE2 on DNS [65] and KB-
+increases with GPUs.                                                                  GAN [2], which represent the dynamic and adversarial algorithms,
+   To express the communication volume as a function that only                        respectively.
+depends on 𝐺, the last column of Table 2 removes 𝑝 by assuming                             For fair comparison, we used the same algorithm hyper-parameters
+𝑝 = 𝑞𝐺. Take COVER for example, we substitute 𝑝 = 𝑞𝐺 and                              for all systems and followed the configurations of Marius [33] un-
+𝑞 = 4 into 𝑝 ∗ 𝑁 ∗ 𝑑/3 to obtain 4 ∗ 𝐺 ∗ 𝑁 ∗ 𝑑/3. These values                        less specified otherwise. In particular, the batch size is 5 × 104 (i.e.,
+should be regarded as lower bounds rather than actual values for                      number of positive edges in each batch), and the number of groups
+the communication volume. This is because besides the 𝑝 = 𝑞𝐺                          in a batch is 50 for shared sampling, which means that each group
+requirement of the GPUs to hold non-overlapping node partitions                       contains 103 positive edges; 𝑠 = 103 negative edges were sampled
+and eliminate node embedding communication, 𝑝 also depends on                         and shared among the positive edges in one group. The optimizer
+node embedding size, which in turn depends on the dataset and                         was Adagrad [7], and the learning rate was 0.1. Training was con-
+model. That is, 𝑞/𝑝 fraction of all the node embeddings must fit                      ducted for 30 epochs on Liverjournal and 10 epochs on the other
+in the memory of each GPU, and when 𝑞/(𝑞𝐺) = 1/𝐺 of the node                          graphs. Marius used 25 epochs on Liverjournal but we observed
+embeddings does not fit in one GPU, larger 𝑝 will be required.                        that better embedding quality was achieved with 30 epochs.
+
+6     EXPERIMENTAL EVALUATION                                                         Baseline systems. We compared GE2 with three state-of-the-art
+                                                                                      graph embedding learning systems, i.e., DGL-KE from Amazon Web
+In this section, we conduct extensive experiments to evaluate our                     Service [68], PBG from Meta [24], and Marius [33]. We carefully
+GE2 and compare with the state-of-the-art graph embedding learn-                      configured the systems to ensure a fair comparison. In particular,
+ing systems. The main findings include:                                               PBG uses disk as the primary data storage, and we excluded all
+• GE2 is efficient, i.e., it speeds up existing systems by over 2X in most            disk IO time when reporting its performance. For Marius, we stored
+  cases and scales much better when using multiple GPUs.                              all data in CPU memory (rather than disk by default) and turned
+• GE2 is general in supporting negative sampling algorithms.                          on its optimizations to pipeline GPU training and CPU-GPU data
+• The designs of GE2 are effective in improving efficiency.                           exchange. We do include MariusGNN [47] in the experiments be-
+                                                                                      cause it only differs from Marius in the strategy of swapping the
+6.1     Experiment Settings                                                           4 https://snap.stanford.edu/data/soc-LiveJournal1.txt.gz
+                                                                                      5 https://snap.stanford.edu/data/twitter-2010.txt.gz
+Datasets and algorithms. We conducted our experiments on the                          6 https://data.dgl.ai/dataset/Freebase.zip
+
+four graph datasets in Table 3, where Dim. is the dimension of the                    7 https://dgl-data.s3-accelerate.amazonaws.com/dataset/OGB-LSC/wikikg90m-v2.zip
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY                                                                                                          Anon.
+
+
+Table 4: Model quality (higher is better) and average epoch                             
+time of the systems when using a single GPU. Number in the
+brackets (e.g., 3.0x) is the speedup of GE2 over the baseline.
+                                                                                        
+
+
+
+
+                                                                                  s055
+  Graph       Model        System      MRR       Hit@10     Time (s)                                                                     *(2
+                             PBG       0.144       0.332    79.3 (3.0x)                                                            0DULXV
+                          DGL-KE       0.150       0.325   135.6 (5.1x)                                                                  '*/.(
+    LJ          Dot                                                                                                                      3%*
+                           Marius      0.151       0.331    90.5 (3.4x)
+                                                                                                                      
+                             GE2       0.152       0.343       26.6
+                                                                                                      7UDLQLQJ7LPHV
+                             PBG       0.014       0.033   940.0 (1.8x)
+                          DGL-KE          -          -     3209.9 (6.2x)   Figure 7: Test sMRR over the 30 training epochs for the Dot
+   TW           Dot
+                           Marius      0.015       0.032   1981.7 (3.8x)   model on the Livejournal graph when using a single GPU.
+                             GE2       0.015       0.034      516.3
+                             PBG       0.365       0.503   688.2 (2.5x)
+                                                                           and larger values indicate better embedding quality. By default,
+                          DGL-KE          -          -     831.7 (3.0x)    we use the exact MRR instead of the sampled MRR (i.e., sMRR)
+             DistMult
+                           Marius      0.397       0.568   427.7 (1.6x)    in Marius, which samples some negative edges for each positive
+                             GE2       0.404       0.604      278.1        edge to conduct evaluation. This is because KEM [21] observes that
+    FB                                                                     sampled MRR can be inaccurate, and following KEM [21], we use
+                             PBG       0.403       0.523   726.7 (2.5x)
+                                                                           104 test edges to compute MRR as using all the test edges will take
+                          DGL-KE          -          -     823.8 (2.8x)    a long time.
+             ComplEx
+                           Marius      0.436       0.578   420.3 (1.4x)
+                             GE2       0.438       0.612      292.6        6.2    Main Results
+                             PBG       0.077       0.121   897.6 (2.3x)    Single GPU. Table 4 compares GE2 with the baselines when using
+                          DGL-KE          -          -     1199.3 (3.1x)   a single GPU to conduct training. DGL-KE misses model quality
+             DistMult                                                      results for all graphs except for the smallest Livejournal since it
+                           Marius      0.106       0.160   729.6 (1.9x)
+                                                                           runs OOM when evaluating the exact MRR. This is because DGL-
+                             GE2       0.103       0.161      392.2        KE materializes all possible edges between the target nodes for
+   WK
+                             PBG       0.080       0.129   1202.1 (2.9x)   MRR evaluation and all nodes in the graph before checking edge
+                                                                           existence, and OOM happens even if we run DGL-KE evaluation on
+                          DGL-KE          -          -     1273.5 (3.1x)
+             ComplEx                                                       the CPU with 378 GB memory. As such, we also evaluated the sMRR
+                           Marius      0.108       0.162   757.5 (1.9x)    of the systems by sampling 104 negative edges for each positive
+                             GE2       0.104       0.164      408.9        edge following Marius [33] and observed that the sMRR scores of
+                                                                           the other systems are comparable to DGL-KE.
+                                                                              The results in Table 4 show that the model quality of GE2 is
+                                                                           comparable to existing systems. In particular, considering MRR,
+node partitions between disk and CPU memory. As such, Marius-              GE2 ranks first in four out of the six cases (i.e., a dataset plus a
+GNN will perform the same as Marius when the node partitions               model) and second in the other two cases. Regrading training time,
+are already in CPU memory. Unless stated otherwise, GE2 used 16            GE2 consistently outperforms the baselines, and the speedup can
+node partitions and turned on the delayed update optimization for          be up to 6.2x (for DGL-KE on the Twitter graph) and is over 2x in
+relation embeddings. All systems were compiled using NVCC-11.3             most cases. As we will show in Section 6.3 with micro experiments,
+with O3 flag.                                                              the high efficiency of GE2 is attributed to higher GPU utilization
+Experiment platform and performance metrics. We conducted                  and lower CPU-GPU communication cost than the baselines. Con-
+the experiments on a server with 4 NVIDIA GeForce RTX 3090                 sidering the baseline systems, both DGL-KE and Marius conduct
+GPUs, and each GPU has approximately 23.69 GB device memory.               CPU-GPU communication for each mini-batch but Marius is more
+The server has 2 Intel Xeon Gold 6226R CPUs, and each GPU has              efficient because it uses a pipeline to hide some of the communica-
+16 physical cores and supports hyper-threading. The main memory            tion costs and a more efficient GPU computation engine. Compared
+capacity was 378 GB. We evaluated the efficiency and model quality         with the baselines, the speedup of GE2 is larger for Livejournal and
+of the systems. For efficiency, we used the average running time           Twitter than Freebase86m and Wiki90m because the Dot model is
+to complete a training epoch, which is called epoch time for short.        simpler than DistMult and ComplEx, and thus the effect of GE2 ’s
+For model quality, we used mean reciprocal rank (MRR) and hit rate         small CPU-GPU communication cost is more significant.
+at k (Hit@k) [21, 24, 33, 68], which are standard quality metrics for         Figure 7 shows that the model quality of GE2 improves smoothly
+graph embedding learning. Both MRR and Hit@k measure the rank              with time for Livejournal (the results are similar for the other
+of the score for a positive edge among all possible negative edges,        datasets), suggesting that training with GE2 is stable. We use sMRR
+GE2 : A General and Efficient Knowledge Graph Embedding Learning System (Technical Report)                                                    Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+
+
+Table 5: Model accuracy and training time of the systems for                                                              Table 6: Model quality and epoch time of GE2 for Dot model
+the Dot model on the Twitter graph.                                                                                       on Livejournal with different negative sampling algorithms.
+
+                                                                  System      MRR         Hit@10          Time(s)                                  1 GPU             2 GPUs            4 GPUs
+                                                                                                                            Graph    Method
+                                                                  DGL-KE           -            -         3209.9 (6.2x)                         MRR      Time     MRR      Time     MRR      Time
+                                                                                                                                       RNS      0.133     23.6    0.131     13.8    0.129     8.7
+       1 GPU                                                       PBG         0.014         0.033        940.0 (1.8x)
+                                                                                                                              LJ       DNS      0.164     50.3    0.162     27.8    0.162    18.3
+                                                                   GE2         0.015         0.034        516.3
+                                                                                                                                     KBGAN      0.136     74.8    0.133     42.1    0.132    23.2
+                                                                  DGL-KE           -            -         2438.3 (7.5x)
+      2 GPUs                                                       PBG         0.014         0.033        603.9 (1.9x)
+                                                                   GE2         0.015         0.033        324.9           GE2 does not, which we have analyzed in Section 5.3 and will show
+                                                                  DGL-KE           -            -         1232.0 (6.8x)   later by experiments. As a result, the speedup of GE2 over PBG is
+                                                                                                                          larger when using more GPUs. DGL-KE is slower than both PBG
+      4 GPUs                                                       PBG         0.014         0.032        567.6 (3.1x)    and GE2 because it conducts CPU-GPU communication for every
+                                                                   GE2         0.015         0.033        181.5           batch.
+                                                                                                                          Advanced negative sampling algorithms. We use DNS [65]
+        7KURXJKSXW6HGJHVV
+
+
+
+
+                                                                      *(2
+                                                                                                                          and KBGAN [2] as representatives of the dynamic and adversarial
+                                                                                                                        negative sampling algorithms, and evaluate the performance of GE2
+                                                                      '*/.(                                        for them. We set the number of candidates (i.e., 𝑘) as 103 for the two
+                                                                    3%*                                              algorithms and sampled 102 negative edges for each positive edge by
+                                                                                                                          computing the scores of these candidates. For a fair comparison of
+                                                                                                                        the algorithms, we also set the number of negative edges to sample
+                                                                                                                          for each positive edge as 102 for RNS [40] in this experiment.
+                                                                                                                           As the three baseline systems (i.e., DGL-KE, PBG, and Marius)
+                                                                                                                          only support static negative sampling algorithms (e.g., RNS), we
+                                                                                                                  can only compare GE2 with the implementations of DNS and KB-
+                                                                           1XPEHURI*38V                   GAN provided by PERec [54], an algorithm framework without
+                                                                                                                          system optimizations. PERec can only use a single GPU and failed
+Figure 8: The relation between GPU count and training                                                                     to run DNS and KBGAN even on Livejournal (the smallest graph we
+throughput for the Dot model on the Twitter graph.                                                                        used) due to timeout (set as 12 hours). Thus, we used a very small
+                                                                                                                          dataset FB15k, which was sampled from the Freebase86m graph and
+                                                                                                                          contained only 15k nodes. To align with PERec as much as possible,
+in Figure 7 because it requires many MRR results, and computing                                                           we disabled negative sample sharing for GE2 . When using a single
+each exact MRR is expensive. The sMRR scores are significantly                                                            GPU, PERec took 88.19s and 89.48s per epoch for DNS and KBGAN
+higher than the exact MRR scores in Table 4 because sMRR consid-                                                          while GE2 only took 15.41s and 17.64s. Thus, the speedup of GE2
+ers fewer negative edges for each positive edge.                                                                          over PERec is close to 6x due to its efficient system designs.
+Multiple GPUs. Table 5 compares GE2 with the baseline systems                                                                In Table 6, we evaluated GE2 on Livejournal. We also provide
+when using multiple GPUs to train the Dot model on the Twitter                                                            the results of RNS for reference. Table 6 shows that the advanced
+graph. The results on the other datasets are similar and thus omitted                                                     negative sampling algorithms (especially DNS) usually yield higher
+due to the page limit. This experiment does not include Marius                                                            model quality than the simple RNS, although they take longer
+because it can only utilize a single GPU. We also report the results                                                      training time due to heavier computation in the sampling process.
+with 1 GPU along side as a reference and transform the training time                                                      In particular, for Livejournal, the relative improvements in MRR
+of the systems into training throughput (i.e., the number of edges                                                        of DNS over RNS are up to 23.3%. The training time of KBGAN
+processed per second) in Figure 8 to better understand the scalability                                                    the longest among the three algorithms because KBGAN uses two
+of the systems. Ideally, training throughput should increase linearly                                                     embeddings for each node and thus has higher CPU-GPU communi-
+with the number of GPUs.                                                                                                  cation costs. The results also suggest that GE2 scales well with the
+   The results show that GE2 consistently outperforms both DGL-                                                           number of GPUs for the advanced negative sampling algorithms,
+KE and PBG when using different number of GPUs. For instance,                                                             which is in line with the results in Table 5.
+with 2 GPUs, GE2 speeds up DGL-KE by 7.5X. Moreover, in Figure 8,                                                         Model quality. One may concern that the partitioning-based train-
+the training throughput of GE2 scales well when increasing the                                                            ing of GE2 can harm model quality because negative sampling is
+number of GPUs. In contrast, the scalability of PBG is poor in                                                            constrained to select the nodes loaded to one GPU. To examine
+Figure 8, and the training throughput only increases marginally                                                           this point, in Table 7, we compare with KEM [21] and HPO [22]
+when increasing from 2 GPUs to 4 GPUs. This is because the CPU-                                                           by reusing their algorithm configurations for GE2 (e.g., embed-
+GPU communication volume of PBG increases quickly with the                                                                ding dimension, number of negative samples, and learning rate).
+number of GPUs while the CPU-GPU communication volume of                                                                  In particular, KEM is a system that supports different partitioning
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY                                                                                                                                            Anon.
+
+
+Table 7: Comparing the model quality of GE2 and baseline                  Table 9: Running time of GE2 when using other scheduling.
+systems. The graph is FB, the model is ComplEx, 𝑑 is embed-
+ding dimension, and 𝑠 is the number of negative samples for                    Graph                                                 LJ               TW                    FB                  WK
+each positive edge.
+                                                                              Strategy                                             Time (s)        Time (s)            Time (s)             Time (s)
+
+                 Configuration          System         MRR                  PGH-Hilbert                                              79.3            940.0                688.2                 897.6
+
+                                          GE2          0.438                GE2 -Hilbert                                             55.2            763.1                721.8                 763.1
+                 𝑑=100, 𝑠=1,000                                             GE2 -COVER                                               26.6            516.3                292.6                 392.2
+                                         KEM           0.423
+                                          GE2          0.586
+                 𝑑=128, 𝑠=10,000                                                                                          
+                                         HPO           0.594                                                                                                                     *(2
+
+
+
+
+                                                                                 *388WLOL]DWLRQ
+                                                                                                                                                                             0DULXV
+                                                                                                                                                                                 '*/.(
+Table 8: The CPU-CPU communication volume when train-                                                                                                                        3%*
+ing the Dot model on the Livejournal graph.
+                                                                                                                           
+                                                                 GE2
+                                                                                                                           
+      GPU          PBG         DGL-KE           Marius
+        1       115.15 GB      121.18 GB      280.98 GB        40.54 GB
+        2       184.36 GB      120.57 GB           -           40.47 GB                                                                                                  
+        4       312.60 GB      119.41 GB           -           40.35 GB                                                                     7UDLQLQJ7LPHV
+                                                                          Figure 9: GPU utilization in an epoch for training the Dot
+strategies for graph embedding learning, and HPO is an algorithm          model on the Livejournal graph with 1 GPU.
+work that searches the optimal hyper-parameter configurations for
+training to achieve high model quality. The results show that the
+model quality of GE2 matches the baselines with only small differ-        results in more CPU-GPU coordination rounds and the problem
+ences, suggesting that partitioning-based training does not hinder        becomes more significant when using 4 GPUs. The short CPU pro-
+model quality. We conjecture that GE2 has lower MRR than HPO be-          cessing time of GE2 validates the benefits of offloading the edge
+cause the optimal hyper-parameter configurations for HPO may not          batching and embedding update tasks to the GPUs. Moreover, the
+be optimal for GE2 due implementation differences (e.g., parameter        CPU-GPU communication time of GE2 is also shorter than the base-
+initialization method). PBG [24] also observes that partition-based       line systems. This is attributed to the partition scheduling algorithm
+training does not hinder model quality.                                   COVER as detailed in Table 8. The Compute time of GE2 is similar
+                                                                          to Marius but notably shorter than DGL-KE and PBG because GE2
+                                                                          and Marius adopt the same efficient GPU computation engine.
+6.3     Micro Results
+                                                                             In Table 8, we report the volume of CPU-GPU communication
+In this part, we conducted detailed profiling to explain the superior     in one epoch for the systems. The results show that the communi-
+performance of GE2 over the baseline systems. In these experi-            cation volume of GE2 is much smaller than the baseline systems
+ments, we used the Livejournal graph by default and note that the         and does not increase with the number of GPUs. In contrast, the
+observations are similar for other graphs.                                communication volume of PBG increases quickly with the number
+Running time breakdown. Figure 1 dissects the epoch time of               of GPUs, which explains its poor scalability in Figure 8. These re-
+GE2 and the baseline systems into three parts: CPU processing, CPU-       sults are also consistent with our analysis in Table 2 of Section 5.3.
+GPU communication, and GPU computation. CPU processing refers             One interesting phenomenon is that although PBG and DGL-KE
+to the operations conducted on the CPU to prepare for training            have similar CPU-GPU communication volume when using 1 GPU,
+and update embeddings, CPU-GPU communication denotes the data             the communication time of DGL-KE is longer than PBG in Figure 1.
+transfer between CPU and GPU, and GPU computation encompasses             This is because DGL-KE conducts many small communications for
+all operations on GPU. Note that we disabled Marius’s pipeline            each batch while PBG conducts communication in the granularity
+optimization in this experiment for clearer time decomposition,           of node partitions.
+and so its epoch time in Figure 1 (117.0s) is longer than reported in        To better understand the performance gain of GE2 over the base-
+Table 4 (90.5s). Marius does not have the results for 4 GPUs because      lines, we adapt GE2 to use the Hilbert bucket ordering of PBG
+it can only run on a single GPU.                                          (denoted as GE2 -Hilbert). Table 9 compares the running time of
+    The results in Figure 1 suggest that the CPU processing time of       GE2 -Hilbert with the original PBG (i.e., PBG-Hilbert) and GE2 (i.e.,
+the baseline systems is notably longer than GE2 . For DGL-KE and          GE2 -Cover). The results validate our previous explanations, i.e., GE2
+Marius, this is because they handle edge batching and embedding           benefits from both the efficient GPU computation engine (compar-
+updates on the CPU. For PBG, this is because it processes one edge        ing GE2 -Hilbert with PBG, which adopt the same bucket ordering)
+bucket each time by loading two node partitions to GPU, which             and the low CPU-GPU communication volume of COVER ordering
+GE2 : A General and Efficient Knowledge Graph Embedding Learning System (Technical Report)                Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+
+
+(comparing GE2 -Hilbert with GE2 -Cover, which adopt the same                         node embedding communication and balanced workload among
+computation engine). For the FB graph, GE2 -Hilbert runs slightly                     the GPUs) and is tackled by our COVER bucket ordering.
+slower than PBG-Hilbert because GE2 re-indexes the node and edge                         PyTorch BigGraph (PBG) [24] mainly considers CPU training and
+IDs in the subgraph formed by each pair of node partitions, while                     utilizes disk as the primary data storage. To reduce sampling time
+PBG pre-processes all the indexes before training. FB is the sparsest                 and memory consumption, PBG introduces the shared sampling
+among all the four graphs, and thus the re-index overhead of GE2                      technique, which shares negative samples among a group of positive
+becomes more significant w.r.t. the cost of training computation.                     edges. GraphVite [69] tackles the special case where a node has two
+    Figure 9 reports the GPU utilization of the systems when uti-                     separate embeddings when serving as the source and destination of
+lizing a single GPU. On average, GE2 exhibits a GPU utilization                       an edge. HET and PaGraph cache the embeddings of popular graph
+of 63.28%, whereas PBG, DGL-KE, and Marius demonstrate a uti-                         nodes on GPU to reduce CPU-GPU communication [27, 31].
+lization of 37.14%, 22.69%, and 27.52%, respectively. DGL-KE and                         KEM [21] conducts an extensive survey and evaluation of graph
+Marius have low GPU utilization because they batch edges and                          partitioning and negative sampling techniques for parallel graph
+update embedding on CPU, and training runs fast on GPU, and thus                      embedding learning with multiple workers. For graph partitioning,
+the GPU is left idle waiting for CPU. Note that for Marius, the GPU                   random partitioning randomly assigns each edge to a worker, rela-
+utilization in Figure 9 is lower than reported in its paper because                   tion partitioning assigns different workers to keep different types of
+our GPU is faster and thus GPU waiting becomes more significant.                      edges, graph-cut partitioning cuts a graph into patches with a small
+PBG has higher GPU utilization than DGL-KE and Marius because                         number of cross-patch edges and assigns each patch to one worker,
+it adopts the partition-based training paradigm, which loads the                      and stratification partitioning organizes the node embeddings into
+node partitions on GPU and reuses them for many batches.                              non-overlapping partitions and assigns each worker to process the
+                                                                                      edge buckets covered by its local node embedding partitions (i.e.,
+                                                                                      the 2D partition of PBG). KEM observes that stratification parti-
+7    RELATED WORK
+                                                                                      tioning generally performs well because it eliminates cross-worker
+Graph embedding learning systems. Graph embedding learns                              communication for node embeddings when combined with local
+an embedding vector for each node in the data graph and finds                         sampling. Moreover, KEM improves the Hilbert ordering of PBG
+many applications. For instance, Alibaba learns item embeddings                       with CAR, which merges each pair of mirror edge buckets, removes
+from the user-item interaction graph and uses the embeddings to                       the inactive node embeddings from partition loading, and reorga-
+quantify item similarity for recommendation [50]. Apple learns                        nizes the node embeddings into partitions for each epoch. However,
+embeddings for the entities (i.e., nodes) in knowledge graphs and                     CAR is still similar to the Hilbert ordering of PBG by keeping two
+links these entities with web contents for search and ranking [17].                   node partitions on each worker. In contrast, our COVER order-
+Microsoft uses graph embeddings to capture the relation between                       ing is fundamentally different from the Hilbert ordering (i.e., by
+search engine queries and recommend queries to users [23].                            connecting to the RBIBD problem and keeping four node parti-
+   The rich applications of graph embeddings led to the develop-                      tions on each worker) and achieves significantly smaller CPU-GPU
+ment of training systems. AWS’ DGL-KE [68] keeps a data graph                         communication volume.
+and node embeddings in CPU memory, and transfers edges and                               Different from negative sampling algorithms, some algorithms
+related node embeddings to GPU for training at batch granularity.                     improve embedding quality by pre-processing the data graph before
+When using multiple GPUs, DGL-KE processes different relations                        training. For instance, UGE [53] constructs an unbiased graph from
+on separate GPUs and allows asynchronous updates for node em-                         a potentially biased one and reduces the influence of some sensitive
+beddings to reduce communication costs. Marius [33] treats disk as                    nodes on the graph embeddings. HEM [66] transforms a hypergraph
+the primary data storage to handle very large graphs and employs                      into an uniform multigraph by integrating empty vertices, thereby
+an algorithm called BETA to swap one node partition between                           allowing vertices to be included multiple times within a hyper-edge.
+disk and CPU memory each time [33]. Similar to DGL-KE, Marius                         While we agree that these pre-processing techniques are important
+conducts CPU-GPU communication at batch granularity.                                  for graph embedding learning, we do not include them as baselines
+   MariusGNN [47] observes that the BETA bucket ordering of                           in our experimental evaluation because our work focuses on system
+Marius harms accuracy when training GNN models because the                            design issues and thus we believe it is more suitable to compare
+training samples produced by BETA are correlated and insufficient                     with graph embedding learning systems, e.g., Marius and PBG,
+in randomness. As such, MariusGNN proposes the COMET order-                           which also focus on system issues such as data movement and
+ing with two enhancements. First, to improve randomness, COMET                        computation scheduling. In contrast to system baselines such as
+uses many physical node partitions and randomly organizes multi-                      Marius and PBG, [53] and [66] are important algorithmic works
+ple physical node partitions into one logical node partition for each                 that are orthogonal to our work.
+epoch, and the logical node partitions are then managed with BETA.                    Graph neural network (GNN) systems. GNN models are also
+Second, to reduce sample correlation, COMET randomly assigns                          widely used for graph data [12], and many systems are designed to
+the task of processing each edge bucket to one of the buffer states                   train GNNs efficiently, e.g., DGL [52], PyG [8], and AliGraph [67].
+that cover the edge bucket, while BETA eagerly processes each edge                    However, the computation pattern of GNNs is fundamentally dif-
+bucket in the first buffer state that covers the edge bucket. Both                    ferent from graph embedding and so are the system optimizations.
+BETA and COMET target disk-based training with a single GPU                           In particular, GNNs compute an output for each node in the data
+and do not consider parallel training with multiple GPUs, which                       graph by aggregating its multi-hop neighbors, and the trainable
+has distinct design requirements from disk-based training (e.g., no
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY                                                                                                                      Anon.
+
+
+parameters are the neural network mappings. In contrast, graph                              [10] Ian J. Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, Bing Xu, David Warde-
+embedding considers 1-hop neighbors directly connected by edges,                                 Farley, Sherjil Ozair, Aaron C. Courville, and Yoshua Bengio. 2014. Generative Ad-
+                                                                                                 versarial Nets. In Annual Conference on Neural Information Processing Systems 2014,
+and the trainable parameters are the node and relation embed-                                    December 8-13 2014, Montreal, Quebec, Canada. 2672–2680. https://proceedings.
+dings. As such, systems for multi-GPU GNN training mainly con-                                   neurips.cc/paper/2014/hash/5ca3e9b122f61f8f06494c97b1afccf3-Abstract.html
+                                                                                            [11] Aditya Grover and Jure Leskovec. 2016. node2vec: Scalable Feature Learning
+sider reducing the communication caused by the multi-hop depen-                                  for Networks. In Proceedings of the 22nd ACM SIGKDD International Conference
+dency [9, 18, 27, 28, 59]. For instance, P3 [9] uses model parallelism                           on Knowledge Discovery and Data Mining, San Francisco, CA, USA, August 13-17,
+in the first layer of GNN models to place computation close to data                              2016. ACM, 855–864. https://doi.org/10.1145/2939672.2939754
+                                                                                            [12] William L. Hamilton, Zhitao Ying, and Jure Leskovec. 2017. Inductive
+and switches to data parallelism in the other layers.                                            Representation Learning on Large Graphs. In Annual Conference on Neu-
+                                                                                                 ral Information Processing Systems 2017, December 4-9, 2017, Long Beach,
+                                                                                                 CA, USA. 1024–1034.             https://proceedings.neurips.cc/paper/2017/hash/
+                                                                                                 5dd9db5e033da9c6fb5ba83c7a7ebea9-Abstract.html
+8    CONCLUSIONS                                                                            [13] Haim Hanani. 1961. The existence and construction of balanced incomplete block
+We presented GE2 as a general and efficient system for graph em-                                 designs. The Annals of Mathematical Statistics 32, 2 (1961), 361–386.
+                                                                                            [14] Haim Hanani, Dwijendra K Ray-Chaudhuri, and Richard M Wilson. 1972. On
+bedding learning. GE2 offers a user-friendly API that allow users                                resolvable designs. Discrete Mathematics 3, 4 (1972), 343–357.
+to easily express different negative sampling algorithms with di-                           [15] David Hilbert and David Hilbert. 1935. Über die stetige Abbildung einer Linie
+                                                                                                 auf ein Flächenstück. Dritter Band: Analysis· Grundlagen der Mathematik· Physik
+verse patterns. GE2 also supports efficient training with multiple                               Verschiedenes: Nebst Einer Lebensgeschichte (1935), 1–2.
+GPUs using the COVER algorithm to schedule data movements                                   [16] Tinglin Huang, Yuxiao Dong, Ming Ding, Zhen Yang, Wenzheng Feng, Xinyu
+between CPU and GPU. Our experimental results show that GE2                                      Wang, and Jie Tang. 2021. MixGCF: An Improved Training Method for Graph Neu-
+                                                                                                 ral Network-based Recommender Systems. In KDD ’21: The 27th ACM SIGKDD
+achieves much shorter training time than the state-of-the-art graph                              Conference on Knowledge Discovery and Data Mining, Virtual Event, Singapore,
+embedding systems and scales well when using multiple GPUs. For                                  August 14-18, 2021. ACM, 665–674. https://doi.org/10.1145/3447548.3467408
+future work, we will extend GE2 to distributed training on multiple                         [17] Ihab F. Ilyas, JP Lacerda, Yunyao Li, Umar Farooq Minhas, Ali Mousavi, Jeffrey
+                                                                                                 Pound, Theodoros Rekatsinas, and Chiraag Sumanth. 2023. Growing and Serving
+machines.                                                                                        Large Open-domain Knowledge Graphs. In Companion of the 2023 International
+                                                                                                 Conference on Management of Data, SIGMOD/PODS 2023, Seattle, WA, USA, June
+                                                                                                 18-23, 2023, Sudipto Das, Ippokratis Pandis, K. Selçuk Candan, and Sihem Amer-
+                                                                                                 Yahia (Eds.). ACM, 253–259. https://doi.org/10.1145/3555041.3589672
+REFERENCES                                                                                  [18] Zhihao Jia, Sina Lin, Mingyu Gao, Matei Zaharia, and Alex Aiken. 2020. Improving
+ [1] Antoine Bordes, Nicolas Usunier, Alberto García-Durán, Jason Weston, and Ok-                the Accuracy, Scalability, and Performance of Graph Neural Networks with Roc.
+     sana Yakhnenko. 2013. Translating Embeddings for Modeling Multi-relational                  In Proceedings of Machine Learning and Systems 2020, MLSys 2020, Austin, TX,
+     Data. In Annual Conference on Neural Information Processing Systems 2013. Decem-            USA, March 2-4, 2020. mlsys.org. https://proceedings.mlsys.org/book/300.pdf
+     ber 5-8, 2013, Lake Tahoe, Nevada, United States. 2787–2795. https://proceedings.      [19] Thomas N. Kipf and Max Welling. 2017. Semi-Supervised Classification with
+     neurips.cc/paper/2013/hash/1cecc7a77928ca8133fa24680a88d2f9-Abstract.html                   Graph Convolutional Networks. In 5th International Conference on Learning
+ [2] Liwei Cai and William Yang Wang. 2018. KBGAN: Adversarial Learning for                      Representations, ICLR 2017, Toulon, France, April 24-26, 2017, Conference Track
+     Knowledge Graph Embeddings. In Proceedings of the 2018 Conference of the                    Proceedings. OpenReview.net. https://openreview.net/forum?id=SJU4ayYgl
+     North American Chapter of the Association for Computational Linguistics: Human         [20] Thomas P Kirkman. 1847. On a problem in combinations. Cambridge and Dublin
+     Language Technologies, NAACL-HLT 2018, New Orleans, Louisiana, USA, June                    Mathematical Journal 2 (1847), 191–204.
+     1-6, 2018, Volume 1 (Long Papers). Association for Computational Linguistics,          [21] Adrian Kochsiek and Rainer Gemulla. 2021. Parallel Training of Knowledge
+     1470–1480. https://doi.org/10.18653/v1/n18-1133                                             Graph Embedding Models: A Comparison of Techniques. Proc. VLDB Endow. 15,
+ [3] Dawei Cheng, Fangzhou Yang, Xiaoyang Wang, Ying Zhang, and Liqing Zhang.                    3 (2021), 633–645. https://doi.org/10.14778/3494124.3494144
+     2020. Knowledge Graph-based Event Embedding Framework for Financial Quan-              [22] Adrian Kochsiek, Fritz Niesel, and Rainer Gemulla. 2022. Start small, think big:
+     titative Investments. In Proceedings of the 43rd International ACM SIGIR confer-            On hyperparameter optimization for large-scale knowledge graph embeddings.
+     ence on research and development in Information Retrieval, SIGIR 2020, Virtual              In Joint European Conference on Machine Learning and Knowledge Discovery in
+     Event, China, July 25-30, 2020. ACM, 2221–2230. https://doi.org/10.1145/3397271.            Databases. Springer, 138–154.
+     3401427                                                                                [23] Jonathan Larson, Darren Edge, Nathan Evans, and Christopher M. White. 2020.
+ [4] Jingtao Ding, Yuhan Quan, Quanming Yao, Yong Li, and Depeng Jin. 2020.                      Making Sense of Search: Using Graph Embedding and Visualization to Transform
+     Simplify and Robustify Negative Sampling for Implicit Collaborative Filter-                 Query Understanding. In Extended Abstracts of the 2020 CHI Conference on Human
+     ing. In Annual Conference on Neural Information Processing Systems 2020, De-                Factors in Computing Systems, CHI 2020, Honolulu, HI, USA, April 25-30, 2020. ACM,
+     cember 6-12, 2020, virtual. https://proceedings.neurips.cc/paper/2020/hash/                 1–8. https://doi.org/10.1145/3334480.3375233
+     0c7119e3a6a2209da6a5b90e5b5b75bd-Abstract.html                                         [24] Adam Lerer, Ledell Wu, Jiajun Shen, Timothée Lacroix, Luca Wehrstedt, Abhijit
+ [5] Bi’an Du, Xiang Gao, Wei Hu, and Xin Li. 2021. Self-Contrastive Learning with               Bose, and Alexander Peysakhovich. 2019. PyTorch-BigGraph: A Large-scale
+     Hard Negative Sampling for Self-supervised Point Cloud Learning. In MM ’21:                 Graph Embedding System. CoRR abs/1903.12287 (2019). arXiv:1903.12287 http:
+     ACM Multimedia Conference, Virtual Event, China, October 20 - 24, 2021. ACM,                //arxiv.org/abs/1903.12287
+     3133–3142. https://doi.org/10.1145/3474085.3475458                                     [25] Jure Leskovec. 2018. Tutorial: Representation Learning on Networks. http:
+ [6] Wei Duan, Junyu Xuan, Maoying Qiao, and Jie Lu. 2022. Learning from the                     //snap.stanford.edu/proj/embeddings-www/
+     Dark: Boosting Graph Convolutional Neural Networks with Diverse Negative               [26] Yankai Lin, Zhiyuan Liu, Maosong Sun, Yang Liu, and Xuan Zhu. 2015. Learning
+     Samples. In Thirty-Sixth AAAI Conference on Artificial Intelligence, AAAI 2022,             Entity and Relation Embeddings for Knowledge Graph Completion. In Proceedings
+     Thirty-Fourth Conference on Innovative Applications of Artificial Intelligence, IAAI        of the Twenty-Ninth AAAI Conference on Artificial Intelligence, January 25-30, 2015,
+     2022, The Twelveth Symposium on Educational Advances in Artificial Intelligence,            Austin, Texas, USA, Blai Bonet and Sven Koenig (Eds.). AAAI Press, 2181–2187.
+     EAAI 2022 Virtual Event, February 22 - March 1, 2022. AAAI Press, 6550–6558.                https://doi.org/10.1609/aaai.v29i1.9491
+     https://doi.org/10.1609/aaai.v36i6.20608                                               [27] Zhiqi Lin, Cheng Li, Youshan Miao, Yunxin Liu, and Yinlong Xu. 2020. PaGraph:
+ [7] John C. Duchi, Elad Hazan, and Yoram Singer. 2010. Adaptive Subgradient                     Scaling GNN training on large graphs via computation-aware caching. In SoCC
+     Methods for Online Learning and Stochastic Optimization. In COLT 2010 - The                 ’20: ACM Symposium on Cloud Computing, Virtual Event, USA, October 19-21, 2020.
+     23rd Conference on Learning Theory, Haifa, Israel, June 27-29, 2010. Omnipress,             ACM, 401–415. https://doi.org/10.1145/3419111.3421281
+     257–269. http://colt2010.haifa.il.ibm.com/papers/COLT2010proceedings.pdf#              [28] Tianfeng Liu, Yangrui Chen, Dan Li, Chuan Wu, Yibo Zhu, Jun He, Yanghua
+     page=265                                                                                    Peng, Hongzheng Chen, Hongzhi Chen, and Chuanxiong Guo. 2023. BGL: GPU-
+ [8] Matthias Fey and Jan Eric Lenssen. 2019. Fast Graph Representation Learning                 Efficient GNN Training by Optimizing Graph Data I/O and Preprocessing. In
+     with PyTorch Geometric. CoRR abs/1903.02428 (2019). arXiv:1903.02428 http:                  20th USENIX Symposium on Networked Systems Design and Implementation, NSDI
+     //arxiv.org/abs/1903.02428                                                                  2023, Boston, MA, April 17-19, 2023. USENIX Association, 103–118. https://www.
+ [9] Swapnil Gandhi and Anand Padmanabha Iyer. 2021. P3: Distributed Deep Graph                  usenix.org/conference/nsdi23/presentation/liu-tianfeng
+     Learning at Scale. In 15th USENIX Symposium on Operating Systems Design and            [29] Finlay MacLean. 2021. Knowledge graphs and their applications in drug discovery.
+     Implementation, OSDI 2021, July 14-16, 2021. USENIX Association, 551–568. https:            Expert opinion on drug discovery 16, 9 (2021), 1057–1069.
+     //www.usenix.org/conference/osdi21/presentation/gandhi
+GE2 : A General and Efficient Knowledge Graph Embedding Learning System (Technical Report)                             Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+
+
+[30] Brendan McMahan, Eider Moore, Daniel Ramage, Seth Hampson, and                          [46] Petar Velickovic, Guillem Cucurull, Arantxa Casanova, Adriana Romero, Pietro
+     Blaise Agüera y Arcas. 2017. Communication-Efficient Learning of Deep Net-                   Liò, and Yoshua Bengio. 2018. Graph Attention Networks. In 6th International
+     works from Decentralized Data. In Proceedings of the 20th International Confer-              Conference on Learning Representations, ICLR 2018, Vancouver, BC, Canada, April 30
+     ence on Artificial Intelligence and Statistics, AISTATS 2017, 20-22 April 2017, Fort         - May 3, 2018, Conference Track Proceedings. OpenReview.net. https://openreview.
+     Lauderdale, FL, USA (Proceedings of Machine Learning Research, Vol. 54). PMLR,               net/forum?id=rJXMpikCZ
+     1273–1282. http://proceedings.mlr.press/v54/mcmahan17a.html                             [47] Roger Waleffe, Jason Mohoney, Theodoros Rekatsinas, and Shivaram Venkatara-
+[31] Xupeng Miao, Hailin Zhang, Yining Shi, Xiaonan Nie, Zhi Yang, Yangyu Tao,                    man. 2023. MariusGNN: Resource-Efficient Out-of-Core Training of Graph Neural
+     and Bin Cui. 2021. HET: Scaling out Huge Embedding Model Training via                        Networks. In Proceedings of the Eighteenth European Conference on Computer
+     Cache-enabled Distributed Framework. Proc. VLDB Endow. 15, 2 (2021), 312–320.                Systems, EuroSys 2023, Rome, Italy, May 8-12, 2023, Giuseppe Antonio Di Luna,
+     https://doi.org/10.14778/3489496.3489511                                                     Leonardo Querzoni, Alexandra Fedorova, and Dushyanth Narayanan (Eds.). ACM,
+[32] Tomás Mikolov, Ilya Sutskever, Kai Chen, Gregory S. Corrado, and Jeffrey                     144–161. https://doi.org/10.1145/3552326.3567501
+     Dean. 2013. Distributed Representations of Words and Phrases and their                  [48] Daixin Wang, Peng Cui, and Wenwu Zhu. 2016. Structural Deep Network Em-
+     Compositionality. In Advances in Neural Information Processing Systems 26:                   bedding. In Proceedings of the 22nd ACM SIGKDD International Conference on
+     27th Annual Conference on Neural Information Processing Systems 2013. Pro-                   Knowledge Discovery and Data Mining, San Francisco, CA, USA, August 13-17, 2016.
+     ceedings of a meeting held December 5-8, 2013, Lake Tahoe, Nevada, United                    ACM, 1225–1234. https://doi.org/10.1145/2939672.2939753
+     States, Christopher J. C. Burges, Léon Bottou, Zoubin Ghahramani, and Kilian Q.         [49] Hongwei Wang, Jia Wang, Jialin Wang, Miao Zhao, Weinan Zhang, Fuzheng
+     Weinberger (Eds.). 3111–3119. https://proceedings.neurips.cc/paper/2013/hash/                Zhang, Xing Xie, and Minyi Guo. 2018. GraphGAN: Graph Representation Learn-
+     9aa42b31882ec039965f3c4923ce901b-Abstract.html                                               ing With Generative Adversarial Nets. In Proceedings of the Thirty-Second AAAI
+[33] Jason Mohoney, Roger Waleffe, Henry Xu, Theodoros Rekatsinas, and Shiv-                      Conference on Artificial Intelligence, (AAAI-18), the 30th innovative Applications
+     aram Venkataraman. 2021. Marius: Learning Massive Graph Embeddings on                        of Artificial Intelligence (IAAI-18), and the 8th AAAI Symposium on Educational
+     a Single Machine. In 15th USENIX Symposium on Operating Systems Design                       Advances in Artificial Intelligence (EAAI-18), New Orleans, Louisiana, USA, Febru-
+     and Implementation, OSDI 2021, July 14-16, 2021. USENIX Association, 533–549.                ary 2-7, 2018, Sheila A. McIlraith and Kilian Q. Weinberger (Eds.). AAAI Press,
+     https://www.usenix.org/conference/osdi21/presentation/mohoney                                2508–2515. https://doi.org/10.1609/aaai.v32i1.11872
+[34] Maximilian Nickel, Volker Tresp, and Hans-Peter Kriegel. 2011. A Three-Way              [50] Jizhe Wang, Pipei Huang, Huan Zhao, Zhibo Zhang, Binqiang Zhao, and Dik Lun
+     Model for Collective Learning on Multi-Relational Data. In Proceedings of the 28th           Lee. 2018. Billion-scale Commodity Embedding for E-commerce Recommendation
+     International Conference on Machine Learning, ICML 2011, Bellevue, Washington,               in Alibaba. In Proceedings of the 24th ACM SIGKDD International Conference on
+     USA, June 28 - July 2, 2011. Omnipress, 809–816. https://icml.cc/2011/papers/                Knowledge Discovery & Data Mining, KDD 2018, London, UK, August 19-23, 2018.
+     438_icmlpaper.pdf                                                                            ACM, 839–848. https://doi.org/10.1145/3219819.3219869
+[35] Rong Pan, Yunhong Zhou, Bin Cao, Nathan Nan Liu, Rajan M. Lukose, Martin                [51] Jun Wang, Lantao Yu, Weinan Zhang, Yu Gong, Yinghui Xu, Benyou Wang,
+     Scholz, and Qiang Yang. 2008. One-Class Collaborative Filtering. In Proceedings              Peng Zhang, and Dell Zhang. 2017. IRGAN: A Minimax Game for Unifying
+     of the 8th IEEE International Conference on Data Mining (ICDM 2008), December                Generative and Discriminative Information Retrieval Models. In Proceedings of
+     15-19, 2008, Pisa, Italy. IEEE Computer Society, 502–511. https://doi.org/10.1109/           the 40th International ACM SIGIR Conference on Research and Development in
+     ICDM.2008.16                                                                                 Information Retrieval, Shinjuku, Tokyo, Japan, August 7-11, 2017. ACM, 515–524.
+[36] Dae Hoon Park and Yi Chang. 2019. Adversarial Sampling and Training for Semi-                https://doi.org/10.1145/3077136.3080786
+     Supervised Information Retrieval. In The World Wide Web Conference, WWW                 [52] Minjie Wang, Lingfan Yu, Da Zheng, Quan Gan, Yu Gai, Zihao Ye, Mufei Li,
+     2019, San Francisco, CA, USA, May 13-17, 2019. ACM, 1443–1453. https://doi.org/              Jinjing Zhou, Qi Huang, Chao Ma, Ziyue Huang, Qipeng Guo, Hao Zhang, Haibin
+     10.1145/3308558.3313416                                                                      Lin, Junbo Zhao, Jinyang Li, Alexander J. Smola, and Zheng Zhang. 2019. Deep
+[37] Bryan Perozzi, Rami Al-Rfou, and Steven Skiena. 2014. DeepWalk: online learning              Graph Library: Towards Efficient and Scalable Deep Learning on Graphs. CoRR
+     of social representations. In The 20th ACM SIGKDD International Conference on                abs/1909.01315 (2019). arXiv:1909.01315 http://arxiv.org/abs/1909.01315
+     Knowledge Discovery and Data Mining, KDD ’14, New York, NY, USA - August 24 -           [53] Nan Wang, Lu Lin, Jundong Li, and Hongning Wang. 2022. Unbiased Graph Em-
+     27, 2014. ACM, 701–710. https://doi.org/10.1145/2623330.2623732                              bedding with Biased Graph Observations. In WWW ’22: The ACM Web Conference
+[38] Jinfeng Rao, Hua He, and Jimmy Lin. 2016. Noise-Contrastive Estimation for                   2022, Virtual Event, Lyon, France, April 25 - 29, 2022, Frédérique Laforest, Raphaël
+     Answer Selection with Deep Neural Networks. In Proceedings of the 25th ACM                   Troncy, Elena Simperl, Deepak Agarwal, Aristides Gionis, Ivan Herman, and
+     International Conference on Information and Knowledge Management, CIKM 2016,                 Lionel Médini (Eds.). ACM, 1423–1433. https://doi.org/10.1145/3485447.3512189
+     Indianapolis, IN, USA, October 24-28, 2016. ACM, 1913–1916. https://doi.org/10.         [54] Xiang Wang, Yaokun Xu, Xiangnan He, Yixin Cao, Meng Wang, and Tat-Seng
+     1145/2983323.2983872                                                                         Chua. 2020. Reinforced Negative Sampling over Knowledge Graph for Recom-
+[39] Colin Reid and Alex Rosa. 2012. Steiner systems 𝑆 (2, 4, 𝑣) -a survey. The Electronic        mendation. In WWW ’20: The Web Conference 2020, Taipei, Taiwan, April 20-24,
+     Journal of Combinatorics (2012), DS18–Feb.                                                   2020. ACM / IW3C2, 99–109. https://doi.org/10.1145/3366423.3380098
+[40] Steffen Rendle, Christoph Freudenthaler, Zeno Gantner, and Lars Schmidt-Thieme.         [55] Zhouxia Wang, Tianshui Chen, Jimmy S. J. Ren, Weihao Yu, Hui Cheng, and
+     2009. BPR: Bayesian Personalized Ranking from Implicit Feedback. In UAI 2009,                Liang Lin. 2018. Deep Reasoning with Knowledge Graph for Social Relationship
+     Proceedings of the Twenty-Fifth Conference on Uncertainty in Artificial Intelligence,        Understanding. In Proceedings of the Twenty-Seventh International Joint Conference
+     Montreal, QC, Canada, June 18-21, 2009. AUAI Press, 452–461. https://www.auai.               on Artificial Intelligence, IJCAI 2018, July 13-19, 2018, Stockholm, Sweden. ijcai.org,
+     org/uai2009/papers/UAI2009_0139_48141db02b9f0b02bc7158819ebfa2c7.pdf                         1021–1028. https://doi.org/10.24963/ijcai.2018/142
+[41] Zhiqing Sun, Zhi-Hong Deng, Jian-Yun Nie, and Jian Tang. 2019. RotatE: Knowl-           [56] Da Xu, Chuanwei Ruan, Evren Körpeoglu, Sushant Kumar, and Kannan Achan.
+     edge Graph Embedding by Relational Rotation in Complex Space. In 7th Interna-                2020. Product Knowledge Graph Embedding for E-commerce. In WSDM ’20:
+     tional Conference on Learning Representations, ICLR 2019, New Orleans, LA, USA,              The Thirteenth ACM International Conference on Web Search and Data Mining,
+     May 6-9, 2019. OpenReview.net. https://openreview.net/forum?id=HkgEQnRqYQ                    Houston, TX, USA, February 3-7, 2020. ACM, 672–680. https://doi.org/10.1145/
+[42] Zequn Sun, Wei Hu, Qingheng Zhang, and Yuzhong Qu. 2018. Bootstrap-                          3336191.3371778
+     ping Entity Alignment with Knowledge Graph Embedding. In Proceedings of                 [57] Lanling Xu, Jianxun Lian, Wayne Xin Zhao, Ming Gong, Linjun Shou, Daxin
+     the Twenty-Seventh International Joint Conference on Artificial Intelligence, IJ-            Jiang, Xing Xie, and Ji-Rong Wen. 2022. Negative Sampling for Contrastive
+     CAI 2018, July 13-19, 2018, Stockholm, Sweden. ijcai.org, 4396–4402. https:                  Representation Learning: A Review. CoRR abs/2206.00212 (2022). https://doi.
+     //doi.org/10.24963/ijcai.2018/611                                                            org/10.48550/arXiv.2206.00212 arXiv:2206.00212
+[43] Zhu Sun, Jie Yang, Jie Zhang, Alessandro Bozzon, Long-Kai Huang, and Chi Xu.            [58] Bishan Yang, Wen-tau Yih, Xiaodong He, Jianfeng Gao, and Li Deng. 2015. Embed-
+     2018. Recurrent knowledge graph embedding for effective recommendation. In                   ding Entities and Relations for Learning and Inference in Knowledge Bases. In 3rd
+     Proceedings of the 12th ACM Conference on Recommender Systems, RecSys 2018,                  International Conference on Learning Representations, ICLR 2015, San Diego, CA,
+     Vancouver, BC, Canada, October 2-7, 2018. ACM, 297–305. https://doi.org/10.1145/             USA, May 7-9, 2015, Conference Track Proceedings. http://arxiv.org/abs/1412.6575
+     3240323.3240361                                                                         [59] Jianbang Yang, Dahai Tang, Xiaoniu Song, Lei Wang, Qiang Yin, Rong Chen,
+[44] Jian Tang, Meng Qu, Mingzhe Wang, Ming Zhang, Jun Yan, and Qiaozhu Mei.                      Wenyuan Yu, and Jingren Zhou. 2022. GNNLab: a factored system for sample-
+     2015. LINE: Large-scale Information Network Embedding. In Proceedings of the                 based GNN training over GPUs. In EuroSys ’22: Seventeenth European Conference
+     24th International Conference on World Wide Web, WWW 2015, Florence, Italy,                  on Computer Systems, Rennes, France, April 5 - 8, 2022. ACM, 417–434. https:
+     May 18-22, 2015. ACM, 1067–1077. https://doi.org/10.1145/2736277.2741093                     //doi.org/10.1145/3492321.3519557
+[45] Théo Trouillon, Johannes Welbl, Sebastian Riedel, Éric Gaussier, and Guillaume          [60] Ruichao Yang, Xiting Wang, Yiqiao Jin, Chaozhuo Li, Jianxun Lian, and Xing
+     Bouchard. 2016. Complex Embeddings for Simple Link Prediction. In Proceedings                Xie. 2022. Reinforcement Subgraph Reasoning for Fake News Detection. In
+     of the 33nd International Conference on Machine Learning, ICML 2016, New York                KDD ’22: The 28th ACM SIGKDD Conference on Knowledge Discovery and Data
+     City, NY, USA, June 19-24, 2016 (JMLR Workshop and Conference Proceedings,                   Mining, Washington, DC, USA, August 14 - 18, 2022. ACM, 2253–2262. https:
+     Vol. 48). JMLR.org, 2071–2080. http://proceedings.mlr.press/v48/trouillon16.html             //doi.org/10.1145/3534678.3539277
+                                                                                             [61] Zhen Yang, Ming Ding, Chang Zhou, Hongxia Yang, Jingren Zhou, and Jie Tang.
+                                                                                                  2020. Understanding Negative Sampling in Graph Representation Learning. In
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY                                                                                                    Anon.
+
+
+     KDD ’20: The 26th ACM SIGKDD Conference on Knowledge Discovery and Data              prevent the repeated generation of buffer states in the node partition
+     Mining, Virtual Event, CA, USA, August 23-27, 2020. ACM, 1666–1676. https:           within a particular subgroup, the COVER algorithm can be used to
+     //doi.org/10.1145/3394486.3403218
+[62] Zhen Yang, Ming Ding, Xu Zou, Jie Tang, Bin Xu, Chang Zhou, and Hongxia              build the buffer state for each new group. It follows the same steps
+     Yang. 2023. Region or Global? A Principle for Negative Sampling in Graph-            as 4𝐿 partitions in the interaction stage for its construction. In this
+     Based Recommendation. IEEE Trans. Knowl. Data Eng. 35, 6 (2023), 6264–6277.
+     https://doi.org/10.1109/TKDE.2022.3155155
+                                                                                          way, all buffer states across 4 groups also meet the requirements.
+[63] Rex Ying, Ruining He, Kaifeng Chen, Pong Eksombatchai, William L. Hamilton,             Therefore, COVER is correct when the number of node partitions
+     and Jure Leskovec. 2018. Graph Convolutional Neural Networks for Web-Scale           is 4𝐿+1 , and by mathematical induction it holds for all 𝐿 ≥ 1.
+     Recommender Systems. In Proceedings of the 24th ACM SIGKDD International
+     Conference on Knowledge Discovery & Data Mining, KDD 2018, London, UK, August                                                                             □
+     19-23, 2018. ACM, 974–983. https://doi.org/10.1145/3219819.3219890
+[64] Xiangxiang Zeng, Xinqi Tu, Yuansheng Liu, Xiangzheng Fu, and Yansen Su.                 This property guarantees that the size of buffer state is always 4,
+     2022. Toward better drug discovery with knowledge graph. Current opinion in          which enables the COVER algorithm to meet our target requirement
+     structural biology 72 (2022), 114–126.
+[65] Weinan Zhang, Tianqi Chen, Jun Wang, and Yong Yu. 2013. Optimizing top-
+                                                                                          in Section 5.
+     n collaborative filtering via dynamic negative item sampling. In The 36th In-
+     ternational ACM SIGIR conference on research and development in Information
+     Retrieval, SIGIR ’13, Dublin, Ireland - July 28 - August 01, 2013. ACM, 785–788.
+     https://doi.org/10.1145/2484028.2484126
+[66] Yaoming Zhen and Junhui Wang. 2023. Community detection in general hyper-
+     graph via graph embedding. J. Amer. Statist. Assoc. 118, 543 (2023), 1620–1629.
+[67] Chenguang Zheng, Hongzhi Chen, Yuxuan Cheng, Zhezheng Song, Yifan Wu,
+     Changji Li, James Cheng, Hao Yang, and Shuai Zhang. 2022. ByteGNN: Efficient
+     Graph Neural Network Training at Large Scale. Proc. VLDB Endow. 15, 6 (2022),
+     1228–1242. https://www.vldb.org/pvldb/vol15/p1228-zheng.pdf
+[68] Da Zheng, Xiang Song, Chao Ma, Zeyuan Tan, Zihao Ye, Jin Dong, Hao Xiong,
+     Zheng Zhang, and George Karypis. 2020. DGL-KE: Training Knowledge Graph
+     Embeddings at Scale. In Proceedings of the 43rd International ACM SIGIR conference
+     on research and development in Information Retrieval, SIGIR 2020, Virtual Event,
+     China, July 25-30, 2020. ACM, 739–748. https://doi.org/10.1145/3397271.3401172
+[69] Zhaocheng Zhu, Shizhen Xu, Jian Tang, and Meng Qu. 2019. GraphVite: A High-
+     Performance CPU-GPU Hybrid System for Node Embedding. In The World Wide
+     Web Conference, WWW 2019, San Francisco, CA, USA, May 13-17, 2019. ACM,
+     2494–2504. https://doi.org/10.1145/3308558.3313508
+
+
+A     PROOF FOR THE COVER ALGORITHM
+We show that COVER can always produce buffer states of size 4
+that satisfy our design requirements.
+   Correctness of COVER. When the total number of node parti-
+tions 𝑝 is 4𝐿 (𝐿 ≥ 1) and each buffer state has 𝑞 = 4 node partitions,
+COVER can terminate (i.e., cover all the edge buckets) and produce
+buffer states that all contain 4 node partitions.
+   Proof. We will the correctness of COVER using mathematical
+induction.
+• Base case: When 𝐿 = 1, the number of node partitions 4𝐿 is 4, and
+  the COVER algorithm can directly put all node partitions into
+  one buffer state. The output of COVER algorithm when 𝐿 = 2
+  can be found in Figure 6. Thus, COVER is correct for both 𝐿 = 1
+  and 𝐿 = 2.
+• Induction hypothesis: Assume that COVER is correct when the
+  number of node partitions 4𝐿 , where 𝐿 ≥ 2.
+• Induction step: We need to prove COVER is correct when the
+  number of node partitions 4𝐿+1 .
+   First, we divide the 4𝐿+1 node partitions into 4 non-overlapping
+groups, each containing 4𝐿 node partitions. We then use the COVER
+algorithm to form buffer states for each group, which ensures that
+the buffer states for each group satisfy our requirements. Next,
+we consider the interaction between the 4 groups. Each group
+is further divided into 4 subgroups, each containing 4𝐿−1 node
+partitions. There are now 16 subgroups. We can then combine these
+16 subgroups according to the last four combinations in Figure 6 to
+form 4 new groups. For each combination, each new group contains
+4 subgroups, and each new group contains 4𝐿 node partitions. To
+
