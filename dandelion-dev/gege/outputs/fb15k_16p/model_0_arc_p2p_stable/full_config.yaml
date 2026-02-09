@@ -1,5 +1,5 @@
 model:
-  random_seed: 769857032171003946
+  random_seed: 1521422981738910208
   learning_task: LINK_PREDICTION
   encoder:
     layers:
@@ -47,7 +47,7 @@ model:
   dense_optimizer:
     type: ADAM
     options:
-      learning_rate: 0.01
+      learning_rate: 0.1
       amsgrad: false
       beta_1: 0.9
       beta_2: 0.999
@@ -56,9 +56,9 @@ model:
   sparse_optimizer:
     type: ADAGRAD
     options:
-      learning_rate: 0.01
-      eps: 1.0e-06
-      init_value: 1.0e-06
+      learning_rate: 0.1
+      eps: 1.0e-10
+      init_value: 0.0
       lr_decay: 0.0
       weight_decay: 0.0
 storage:
@@ -112,16 +112,16 @@ storage:
   model_dir: /mnt/beegfs/smansou2/GE2/dandelion-dev/gege/outputs/fb15k_16p/model_0_arc_p2p_stable/
   log_level: info
 training:
-  batch_size: 2000
+  batch_size: 10000
   negative_sampling_method: RNS
   negative_sampling_selected_ratio: 1.0
   negative_sampling:
     num_chunks: 10
-    negatives_per_positive: 50
+    negatives_per_positive: 1000
     degree_fraction: 0.5
     filtered: false
     local_filter_mode: DEG
-  num_epochs: 2
+  num_epochs: 5
   epochs_per_shuffle: 1
   logs_per_epoch: 10
   save_model: true
@@ -134,10 +134,10 @@ training:
 evaluation:
   batch_size: 1000
   negative_sampling:
-    num_chunks: 10
+    num_chunks: 1
     negatives_per_positive: 50
-    degree_fraction: 0.5
+    degree_fraction: 0.0
     filtered: false
     local_filter_mode: DEG
-  epochs_per_eval: 2
+  epochs_per_eval: 5
   checkpoint_dir: /mnt/beegfs/smansou2/GE2/dandelion-dev/gege/outputs/fb15k_16p/model_0_arc_p2p_stable/

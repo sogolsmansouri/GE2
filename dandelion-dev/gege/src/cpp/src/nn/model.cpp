@@ -408,6 +408,14 @@ void Model::train_batch(shared_ptr<Batch> batch, bool call_step) {
         throw GegeRuntimeException("Unsupported learning task for training");
     }
 
+    if (!torch::isfinite(loss).all().item<bool>()) {
+        throw GegeRuntimeException("Non-finite training loss detected");
+    }
+
+    if (!torch::isfinite(loss).all().item<bool>()) {
+        throw GegeRuntimeException("Non-finite training loss detected");
+    }
+
     loss.backward();
 
     if (call_step) {
@@ -446,6 +454,12 @@ void Model::evaluate_batch(shared_ptr<Batch> batch) {
         torch::Tensor neg_scores = std::get<1>(all_scores);
         torch::Tensor inv_pos_scores = std::get<2>(all_scores);
         torch::Tensor inv_neg_scores = std::get<3>(all_scores);
+
+        if (!torch::isfinite(pos_scores).all().item<bool>() || (neg_scores.defined() && !torch::isfinite(neg_scores).all().item<bool>()) ||
+            (inv_pos_scores.defined() && !torch::isfinite(inv_pos_scores).all().item<bool>()) ||
+            (inv_neg_scores.defined() && !torch::isfinite(inv_neg_scores).all().item<bool>())) {
+            throw GegeRuntimeException("Non-finite evaluation scores detected");
+        }
 
         if (neg_scores.defined()) {
             std::dynamic_pointer_cast<LinkPredictionReporter>(reporter_)->addResult(pos_scores, neg_scores);

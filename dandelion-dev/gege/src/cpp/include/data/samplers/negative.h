@@ -40,12 +40,12 @@ class NegativeSampler {
     virtual std::tuple<torch::Tensor, torch::Tensor> compute(torch::Tensor src_embeddings, torch::Tensor dst_embeddings, torch::Tensor dst_neg_embeddings, torch::Tensor src_neg_embeddings,
                                                              torch::Tensor src_embeddings_g, torch::Tensor dst_embeddings_g, torch::Tensor dst_neg_embeddings_g, torch::Tensor src_neg_embeddings_g,
                                                              int batch_num, int embedding_size, int chunk_num, int num_per_chunk, bool has_relations, bool use_inverse_relations) {
-        SPDLOG_INFO("NegativeSampling: compute needs override");
+        throw GegeRuntimeException("NegativeSampling::compute needs override");
     }
 
     virtual std::tuple<torch::Tensor, torch::Tensor> sample(torch::Tensor dst_negs, torch::Tensor src_negs, torch::Tensor dst_negs_scores, torch::Tensor src_negs_scores,
                                                              int chunk_num, int num_per_chunk, int selected_negatives_num, bool has_relations, bool use_inverse_relations) {
-        SPDLOG_INFO("NegativeSampling: sample needs override");
+        throw GegeRuntimeException("NegativeSampling::sample needs override");
     }
 };
 

@@ -1,6 +1,7 @@
 #include "reporting/reporting.h"
 
 #include <fstream>
+#include <limits>
 
 #include "configuration/constants.h"
 #include "reporting/logger.h"
@@ -50,7 +51,19 @@ void LinkPredictionReporter::clear() {
 }
 
 torch::Tensor LinkPredictionReporter::computeRanks(torch::Tensor pos_scores, torch::Tensor neg_scores) {
-    return (neg_scores >= pos_scores.unsqueeze(1)).sum(1) + 1;
+    torch::Tensor pos = pos_scores.unsqueeze(1);
+    torch::Tensor neg = neg_scores;
+
+    torch::Tensor pos_finite = torch::isfinite(pos);
+    torch::Tensor neg_finite = torch::isfinite(neg);
+    if ((!pos_finite.all().item<bool>()) || (!neg_finite.all().item<bool>())) {
+        SPDLOG_WARN("LinkPredictionReporter: non-finite scores detected during ranking");
+    }
+
+    pos = torch::where(pos_finite, pos, torch::full_like(pos, -std::numeric_limits<float>::infinity()));
+    neg = torch::where(neg_finite, neg, torch::full_like(neg, std::numeric_limits<float>::infinity()));
+
+    return (neg >= pos).sum(1) + 1;
 }
 
 void LinkPredictionReporter::addResult(torch::Tensor pos_scores, torch::Tensor neg_scores, torch::Tensor edges) {

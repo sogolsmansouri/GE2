@@ -188,11 +188,16 @@ class GraphModelStorage {
     }
 
     bool useInMemorySubGraph() {
-        bool embeddings_buffered = instance_of<Storage, PartitionBufferStorage>(storage_ptrs_.node_embeddings);
-        embeddings_buffered = embeddings_buffered || instance_of<Storage, MemPartitionBufferStorage>(storage_ptrs_.node_embeddings);
+        bool embeddings_partition_buffered = instance_of<Storage, PartitionBufferStorage>(storage_ptrs_.node_embeddings);
+        bool embeddings_mem_buffered = instance_of<Storage, MemPartitionBufferStorage>(storage_ptrs_.node_embeddings);
         bool features_buffered = instance_of<Storage, PartitionBufferStorage>(storage_ptrs_.node_features);
 
-        return (embeddings_buffered || features_buffered) && (train_ || (!full_graph_evaluation_));
+        // MEM_PARTITION_BUFFER requires an active buffer state in both train/eval.
+        if (embeddings_mem_buffered) {
+            return true;
+        }
+
+        return (embeddings_partition_buffered || features_buffered) && (train_ || (!full_graph_evaluation_));
     }
 
     bool hasSwap(int32_t device_idx = 0) {
