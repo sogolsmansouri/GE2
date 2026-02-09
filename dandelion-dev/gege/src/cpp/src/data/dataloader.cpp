@@ -4,7 +4,22 @@
 #include "data/ordering.h"
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <sstream>
+
+namespace {
+bool profile_timing_enabled() {
+    static const bool enabled = []() {
+        const char *env = std::getenv("GEGE_PROFILE_TIMING");
+        if (env == nullptr) {
+            return false;
+        }
+        return !(env[0] == '\0' || (env[0] == '0' && env[1] == '\0'));
+    }();
+    return enabled;
+}
+} // namespace
 
 DataLoader::DataLoader(shared_ptr<GraphModelStorage> graph_storage, LearningTask learning_task, shared_ptr<TrainingConfig> training_config,
                        shared_ptr<EvaluationConfig> evaluation_config, shared_ptr<EncoderConfig> encoder_config, vector<torch::Device> devices,
@@ -141,6 +156,7 @@ void DataLoader::nextEpoch() {
 }
 
 void DataLoader::setActiveEdges(int32_t device_idx) {
+    auto set_active_start = std::chrono::steady_clock::now();
     auto state = graph_storage_->current_subgraph_states_[device_idx];
     if (state != nullptr && state->all_in_memory_edges_.defined()) {
         SPDLOG_INFO("setActiveEdges: device={} in_mem_edges size={}x{}",
@@ -235,6 +251,12 @@ void DataLoader::setActiveEdges(int32_t device_idx) {
     active_edges = (active_edges.index_select(0, perm));
     perm = torch::Tensor();
     graph_storage_->setActiveEdges(active_edges, device_idx);
+
+    if (profile_timing_enabled()) {
+        auto set_active_end = std::chrono::steady_clock::now();
+        auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(set_active_end - set_active_start).count();
+        SPDLOG_INFO("Timing setActiveEdges: device={} total={}ms active_edges={}", device_idx, total_ms, active_edges.size(0));
+    }
 }
 
 void DataLoader::setActiveNodes() {
@@ -521,6 +543,8 @@ shared_ptr<Batch> DataLoader::getNextBatch(int32_t device_idx) {
         batch = nullptr;
         if (graph_storage_->useInMemorySubGraph()) {
             if (graph_storage_->hasSwap(device_idx)) {
+                auto transition_start = std::chrono::steady_clock::now();
+                auto wait_batches_start = transition_start;
                 // Training uses one consumer per configured device; synchronous evaluation consumes only device 0.
                 int swap_participants = train_ ? static_cast<int>(all_batches_.size()) : 1;
                 if (swap_participants <= 0) {
@@ -537,11 +561,14 @@ shared_ptr<Batch> DataLoader::getNextBatch(int32_t device_idx) {
                 while(async_barrier.load() % swap_participants != 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
+                auto wait_batches_end = std::chrono::steady_clock::now();
 
                 // ensure all devices finished the current round before swapping
+                auto wait_active_start = wait_batches_end;
                 while (activate_devices_.load() > 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
+                auto wait_active_end = std::chrono::steady_clock::now();
 
                 int next_round_id = 0;
                 if (device_idx < device_swap_rounds_.size()) {
@@ -555,17 +582,21 @@ shared_ptr<Batch> DataLoader::getNextBatch(int32_t device_idx) {
                 if (devices_.size() <= 1) {
         c10::cuda::CUDACachingAllocator::emptyCache();
     }
+                auto update_start = std::chrono::steady_clock::now();
                 // SPDLOG_INFO("Swapping subgraph for device {}", device_idx);
                 // auto t1 = std::chrono::high_resolution_clock::now();
                 graph_storage_->updateInMemorySubGraph(device_idx);
                 // SPDLOG_INFO("graph_storage_->updateInMemorySubGraph");
+                auto update_end = std::chrono::steady_clock::now();
 
                 if (devices_.size() <= 1) {
         c10::cuda::CUDACachingAllocator::emptyCache();
     }
                 // auto t11 = std::chrono::high_resolution_clock::now();
                 // SPDLOG_INFO("Time to updateInMemorySubGraph for device {}: {} ms", device_idx, std::chrono::duration_cast<std::chrono::milliseconds>(t11 - t1).count());
+                auto init_start = std::chrono::steady_clock::now();
                 initializeBatches(false, device_idx);
+                auto init_end = std::chrono::steady_clock::now();
                 if (devices_.size() <= 1) {
         c10::cuda::CUDACachingAllocator::emptyCache();
     }
@@ -576,8 +607,29 @@ shared_ptr<Batch> DataLoader::getNextBatch(int32_t device_idx) {
                     device_swap_rounds_[device_idx] = next_round_id;
                 }
 
+                auto wait_swap_tasks_start = std::chrono::steady_clock::now();
                 while(swap_tasks_completed.load() != swap_participants) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+                auto wait_swap_tasks_end = std::chrono::steady_clock::now();
+                if (profile_timing_enabled()) {
+                    auto transition_end = wait_swap_tasks_end;
+                    auto wait_batches_ms = std::chrono::duration_cast<std::chrono::milliseconds>(wait_batches_end - wait_batches_start).count();
+                    auto wait_active_ms = std::chrono::duration_cast<std::chrono::milliseconds>(wait_active_end - wait_active_start).count();
+                    auto update_ms = std::chrono::duration_cast<std::chrono::milliseconds>(update_end - update_start).count();
+                    auto init_ms = std::chrono::duration_cast<std::chrono::milliseconds>(init_end - init_start).count();
+                    auto wait_swap_tasks_ms = std::chrono::duration_cast<std::chrono::milliseconds>(wait_swap_tasks_end - wait_swap_tasks_start).count();
+                    auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(transition_end - transition_start).count();
+                    SPDLOG_INFO(
+                        "Timing round transition: device={} round={} wait_batches={}ms wait_active={}ms update_subgraph={}ms initialize_batches={}ms wait_swap_tasks={}ms total={}ms",
+                        device_idx,
+                        next_round_id,
+                        wait_batches_ms,
+                        wait_active_ms,
+                        update_ms,
+                        init_ms,
+                        wait_swap_tasks_ms,
+                        total_ms);
                 }
                 // auto t2 = std::chrono::high_resolution_clock::now();
                 // SPDLOG_INFO("Finished swapping subgraph for device {}", device_idx);

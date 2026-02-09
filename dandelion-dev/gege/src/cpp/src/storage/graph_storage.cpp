@@ -2,13 +2,29 @@
 #include <c10/cuda/CUDACachingAllocator.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <random>
+#include <sstream>
 #include <c10/cuda/CUDAStream.h>
 #include <ATen/cuda/CUDAEvent.h>
 
 #include "configuration/util.h"
 #include "data/ordering.h"
 #include "reporting/logger.h"
+
+namespace {
+bool profile_timing_enabled() {
+    static const bool enabled = []() {
+        const char *env = std::getenv("GEGE_PROFILE_TIMING");
+        if (env == nullptr) {
+            return false;
+        }
+        return !(env[0] == '\0' || (env[0] == '0' && env[1] == '\0'));
+    }();
+    return enabled;
+}
+} // namespace
 
 GraphModelStorage::GraphModelStorage(GraphModelStoragePtrs storage_ptrs, shared_ptr<StorageConfig> storage_config) {
     storage_ptrs_ = storage_ptrs;
@@ -636,16 +652,23 @@ void GraphModelStorage::updateInMemorySubGraph(int32_t device_idx) {
             for (int d = 0; d < devices_.size(); ++d) {
                 swap_ids_per_device[d] = getNextSwapIds(d);
             }
-            auto t1 = std::chrono::high_resolution_clock::now();
+            auto coordinator_start = std::chrono::steady_clock::now();
+            auto swap_start = std::chrono::steady_clock::now();
             performSwap(0);
-            auto t2 = std::chrono::high_resolution_clock::now();
+            auto swap_end = std::chrono::steady_clock::now();
             if (devices_.size() <= 1) {
         c10::cuda::CUDACachingAllocator::emptyCache();
     }
 
+            auto rebuild_start = std::chrono::steady_clock::now();
+            std::vector<int64_t> rebuild_ms_per_device(devices_.size(), 0);
             for (int d = 0; d < devices_.size(); ++d) {
+                auto rebuild_device_start = std::chrono::steady_clock::now();
                 updateInMemorySubGraph_(current_subgraph_states_[d], swap_ids_per_device[d], d);
+                auto rebuild_device_end = std::chrono::steady_clock::now();
+                rebuild_ms_per_device[d] = std::chrono::duration_cast<std::chrono::milliseconds>(rebuild_device_end - rebuild_device_start).count();
             }
+            auto rebuild_end = std::chrono::steady_clock::now();
 
             {
                 std::lock_guard<std::mutex> lk(p2p_update_mutex_);
@@ -658,21 +681,51 @@ void GraphModelStorage::updateInMemorySubGraph(int32_t device_idx) {
                 }
             }
             p2p_update_cv_.notify_all();
+            if (profile_timing_enabled()) {
+                auto coordinator_end = std::chrono::steady_clock::now();
+                auto swap_ms = std::chrono::duration_cast<std::chrono::milliseconds>(swap_end - swap_start).count();
+                auto rebuild_ms = std::chrono::duration_cast<std::chrono::milliseconds>(rebuild_end - rebuild_start).count();
+                auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(coordinator_end - coordinator_start).count();
+                std::ostringstream per_device_rebuild;
+                for (int d = 0; d < static_cast<int>(rebuild_ms_per_device.size()); ++d) {
+                    if (d > 0) {
+                        per_device_rebuild << ", ";
+                    }
+                    per_device_rebuild << "d" << d << "=" << rebuild_ms_per_device[d] << "ms";
+                }
+                SPDLOG_INFO("Timing updateInMemorySubGraph coordinator: swap={}ms rebuild_total={}ms total={}ms [{}]",
+                            swap_ms,
+                            rebuild_ms,
+                            total_ms,
+                            per_device_rebuild.str());
+            }
             return;
         }
 std::pair<std::vector<int>, std::vector<int>> current_swap_ids = getNextSwapIds(device_idx);
         // SPDLOG_INFO("performSwap");
-        auto t1 = std::chrono::high_resolution_clock::now();
+        auto call_start = std::chrono::steady_clock::now();
+        auto swap_start = std::chrono::steady_clock::now();
         performSwap(device_idx);
-        auto t2 = std::chrono::high_resolution_clock::now();
+        auto swap_end = std::chrono::steady_clock::now();
         // SPDLOG_INFO("performSwap time {}", std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count());
         if (devices_.size() <= 1) {
         c10::cuda::CUDACachingAllocator::emptyCache();
     }
         // SPDLOG_INFO("updateInMemorySubGraph_");
-        t1 = std::chrono::high_resolution_clock::now();
+        auto rebuild_start = std::chrono::steady_clock::now();
         updateInMemorySubGraph_(current_subgraph_states_[device_idx], current_swap_ids, device_idx);
-        t2 = std::chrono::high_resolution_clock::now();
+        auto rebuild_end = std::chrono::steady_clock::now();
+        if (profile_timing_enabled()) {
+            auto call_end = std::chrono::steady_clock::now();
+            auto swap_ms = std::chrono::duration_cast<std::chrono::milliseconds>(swap_end - swap_start).count();
+            auto rebuild_ms = std::chrono::duration_cast<std::chrono::milliseconds>(rebuild_end - rebuild_start).count();
+            auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(call_end - call_start).count();
+            SPDLOG_INFO("Timing updateInMemorySubGraph device={}: swap={}ms rebuild={}ms total={}ms",
+                        device_idx,
+                        swap_ms,
+                        rebuild_ms,
+                        total_ms);
+        }
         // SPDLOG_INFO("updateInMemorySubGraph_ time {}", std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count());
         // SPDLOG_INFO("performSwap time {}, updateInMemorySubGraph_ {}", duration, duration2);
         // for (int device_idx = 0; device_idx < current_subgraph_states_.size(); device_idx ++) {
@@ -706,6 +759,7 @@ void GraphModelStorage::getNextSubGraph() {
 }
 
 void GraphModelStorage::updateInMemorySubGraph_(shared_ptr<InMemorySubgraphState> subgraph, std::pair<std::vector<int>, std::vector<int>> swap_ids, int32_t device_idx) {
+    auto total_start = std::chrono::steady_clock::now();
     if (prefetch_) {
         subgraph_lock_->lock();
     }
@@ -722,6 +776,7 @@ void GraphModelStorage::updateInMemorySubGraph_(shared_ptr<InMemorySubgraphState
     int num_swap_partitions = evict_partition_ids.size();
     int num_remaining_partitions = buffer_size - num_swap_partitions;
 
+    auto bucket_partition_start = std::chrono::steady_clock::now();
     // get edge buckets that will be kept in memory
     torch::Tensor keep_mask = torch::ones({num_edge_buckets_in_mem}, torch::kBool);
     auto accessor_keep_mask = keep_mask.accessor<bool, 1>();
@@ -765,8 +820,10 @@ void GraphModelStorage::updateInMemorySubGraph_(shared_ptr<InMemorySubgraphState
     torch::Tensor new_in_mem_partition_ids = current_subgraph_states_[device_idx]->in_memory_partition_ids_.masked_scatter(~keep_mask, admit_ids_tensor);
     auto old_in_mem_partition_ids_accessor = old_in_mem_partition_ids.accessor<int64_t, 1>();
     auto new_in_mem_partition_ids_accessor = new_in_mem_partition_ids.accessor<int64_t, 1>();
+    auto bucket_partition_end = std::chrono::steady_clock::now();
 
     // get new incoming edge buckets
+    auto bucket_meta_start = std::chrono::steady_clock::now();
     int num_new_edge_buckets = num_swap_partitions * (num_remaining_partitions + buffer_size);
     // SPDLOG_INFO("num_new_edge_buckets {}", num_new_edge_buckets);
     torch::Tensor new_edge_bucket_ids = torch::zeros({num_new_edge_buckets}, torch::kInt64);
@@ -844,8 +901,10 @@ void GraphModelStorage::updateInMemorySubGraph_(shared_ptr<InMemorySubgraphState
     in_mem_edge_bucket_sizes = (in_mem_edge_bucket_sizes.index_select(0, arg_sort));
     local_or_global_edge_bucket_starts = (local_or_global_edge_bucket_starts.index_select(0, arg_sort));
     in_mem_mask = (in_mem_mask.index_select(0, arg_sort));
+    auto bucket_meta_end = std::chrono::steady_clock::now();
 
     // with everything in order grab the edge buckets
+    auto edge_materialize_start = std::chrono::steady_clock::now();
     torch::Tensor in_mem_edge_bucket_starts = in_mem_edge_bucket_sizes.cumsum(0);
     int64_t total_size = in_mem_edge_bucket_starts[-1].item<int64_t>();
     in_mem_edge_bucket_starts = in_mem_edge_bucket_starts - in_mem_edge_bucket_sizes;
@@ -874,7 +933,9 @@ void GraphModelStorage::updateInMemorySubGraph_(shared_ptr<InMemorySubgraphState
     }
 
     subgraph->all_in_memory_edges_ = new_all_in_memory_edges;
+    auto edge_materialize_end = std::chrono::steady_clock::now();
 
+    auto map_graph_start = std::chrono::steady_clock::now();
     if (storage_ptrs_.node_embeddings != nullptr) {
         if (instance_of<Storage, PartitionBufferStorage>(storage_ptrs_.node_embeddings)) {
             subgraph->global_to_local_index_map_ =
@@ -940,6 +1001,26 @@ void GraphModelStorage::updateInMemorySubGraph_(shared_ptr<InMemorySubgraphState
         prefetch_complete_ = true;
         subgraph_lock_->unlock();
         subgraph_cv_->notify_all();
+    }
+
+    if (profile_timing_enabled()) {
+        auto total_end = std::chrono::steady_clock::now();
+        auto map_graph_end = total_end;
+        auto bucket_partition_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(bucket_partition_end - bucket_partition_start).count();
+        auto bucket_meta_ms = std::chrono::duration_cast<std::chrono::milliseconds>(bucket_meta_end - bucket_meta_start).count();
+        auto edge_materialize_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(edge_materialize_end - edge_materialize_start).count();
+        auto map_graph_ms = std::chrono::duration_cast<std::chrono::milliseconds>(map_graph_end - map_graph_start).count();
+        auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(total_end - total_start).count();
+        SPDLOG_INFO(
+            "Timing updateInMemorySubGraph_: device={} buckets_partition={}ms buckets_meta={}ms edge_materialize={}ms map_and_graph={}ms total={}ms",
+            device_idx,
+            bucket_partition_ms,
+            bucket_meta_ms,
+            edge_materialize_ms,
+            map_graph_ms,
+            total_ms);
     }
 }
 
