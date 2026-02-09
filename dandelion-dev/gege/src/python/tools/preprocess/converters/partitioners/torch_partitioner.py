@@ -12,14 +12,16 @@ def dataframe_to_tensor(input_dataframe):
 def partition_edges(edges, num_nodes, num_partitions):
     partition_size = int(np.ceil(num_nodes / num_partitions))
 
-    src_partitions = torch.div(edges[:, 0], partition_size, rounding_mode="trunc")
-    dst_partitions = torch.div(edges[:, -1], partition_size, rounding_mode="trunc")
+    # Use integer floor division for compatibility with older PyTorch versions
+    # that do not support torch.div(..., rounding_mode=...).
+    src_partitions = edges[:, 0] // partition_size
+    dst_partitions = edges[:, -1] // partition_size
 
     _, dst_args = torch.sort(dst_partitions, stable=True)
     _, src_args = torch.sort(src_partitions[dst_args], stable=True)
 
     edges = edges[dst_args[src_args]]
-    edge_bucket_ids = torch.div(edges, partition_size, rounding_mode="trunc")
+    edge_bucket_ids = edges // partition_size
 
     offsets = np.zeros([num_partitions, num_partitions], dtype=int)
 
