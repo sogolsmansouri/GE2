@@ -887,6 +887,9 @@ void DataLoader::updateEmbeddingsG(shared_ptr<Batch> batch, bool gpu, int32_t de
 void DataLoader::loadStorage() {
     loaded_subgraphs = 0;
     async_barrier = 0;
+    // Training may use one worker per configured GPU, while synchronous evaluation
+    // consumes batches only on device 0. Reset this counter on every dataset switch.
+    activate_devices_ = train_ ? static_cast<int64_t>(devices_.size()) : 1;
     setBufferOrdering();
     graph_storage_->load();
     if (negative_sampling_method_ == NegativeSamplingMethod::GAN) {
