@@ -147,7 +147,7 @@ void SynchronousMultiGPUTrainer::train(int num_epochs) {
     Timer timer = Timer(false); 
 
     std::atomic<int64_t> need_sync = 0;
-    std::atomic<bool> sync_finished = false;
+    std::atomic<int64_t> sync_generation = 0;
     
     for (int epoch = 0; epoch < num_epochs; epoch++) {
         timer.start();
@@ -155,7 +155,7 @@ void SynchronousMultiGPUTrainer::train(int num_epochs) {
 
         SPDLOG_INFO("################ Starting training epoch {} ################", dataloader_->getEpochsProcessed() + 1);
         for (int32_t device_idx = 0; device_idx < model_->device_models_.size(); device_idx ++) {
-            threads.emplace_back(std::thread([this, &need_sync, &sync_finished, device_idx] {
+            threads.emplace_back(std::thread([this, &need_sync, &sync_generation, device_idx] {
                 while (dataloader_->hasNextBatch(device_idx)) {
                     // gets data and parameters for the next batch
 
@@ -206,18 +206,16 @@ void SynchronousMultiGPUTrainer::train(int num_epochs) {
                     //     }
                     // }
 
-                    if(has_relation) {
-                        // if ((batch->batch_id_ + 1) % 1 == 0 || dataloader_->batches_left_[device_idx] == 1) {
-                        {
-                            sync_finished = false;
-                            need_sync ++;
+                    if (has_relation) {
+                        int64_t observed_generation = sync_generation.load();
+                        int64_t arrivals = need_sync.fetch_add(1) + 1;
 
-                            if (need_sync == dataloader_->activate_devices_) {
-                                model_->all_reduce();
-                                sync_finished = true;
-                                need_sync = 0;
-                            }
-                            while (!sync_finished) {
+                        if (arrivals == dataloader_->activate_devices_) {
+                            model_->all_reduce();
+                            need_sync.store(0);
+                            sync_generation.fetch_add(1);
+                        } else {
+                            while (sync_generation.load() == observed_generation) {
                                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                             }
                         }
