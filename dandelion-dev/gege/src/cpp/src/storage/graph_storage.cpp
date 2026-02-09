@@ -607,11 +607,13 @@ void GraphModelStorage::updateInMemorySubGraph(int32_t device_idx) {
         }
     } else {
         
-        auto p2p_guard = std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_embeddings);
-        if (!p2p_guard) {
-            p2p_guard = std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_embeddings_g);
+        auto mem_buffer_guard = std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_embeddings);
+        if (!mem_buffer_guard) {
+            mem_buffer_guard = std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_embeddings_g);
         }
-        if (p2p_guard && p2p_guard->interGpuSwapEnabled()) {
+        // Coordinate swaps for multi-GPU MEM_PARTITION_BUFFER in one place (device 0),
+        // regardless of P2P mode. Non-P2P path also swaps all devices per call.
+        if (mem_buffer_guard && devices_.size() > 1) {
             {
                 std::lock_guard<std::mutex> lk(p2p_update_mutex_);
                 if (p2p_update_last_seen_.size() != devices_.size()) {
