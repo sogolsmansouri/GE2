@@ -79,30 +79,52 @@ CheckpointMeta Checkpointer::loadMetadata(string directory) {
     CheckpointMeta ret_meta;
 
     std::ifstream input_file;
+    string metadata_file = directory + PathConstants::checkpoint_metadata_file;
 
-    input_file.open(directory + PathConstants::checkpoint_metadata_file);
+    input_file.open(metadata_file);
+    if (!input_file.is_open()) {
+        throw std::runtime_error("Checkpoint metadata file not found: " + metadata_file);
+    }
 
-    std::string line;
-    std::getline(input_file, line);
-    ret_meta.name = line;
+    auto read_line_or_throw = [&](const char *field_name) -> string {
+        string line;
+        if (!std::getline(input_file, line)) {
+            throw std::runtime_error("Checkpoint metadata is missing field: " + string(field_name) + " (" + metadata_file + ")");
+        }
+        return line;
+    };
 
-    std::getline(input_file, line);
+    auto parse_int_or_throw = [&](const string &line, const char *field_name) -> int {
+        try {
+            size_t pos = 0;
+            int value = std::stoi(line, &pos);
+            if (pos != line.size()) {
+                throw std::invalid_argument("trailing characters");
+            }
+            return value;
+        } catch (const std::exception &) {
+            throw std::runtime_error("Invalid integer for metadata field '" + string(field_name) + "': '" + line + "' (" + metadata_file + ")");
+        }
+    };
 
-    ret_meta.num_epochs = std::stoi(line);
+    ret_meta.name = read_line_or_throw("name");
 
-    std::getline(input_file, line);
-    ret_meta.checkpoint_id = std::stoi(line);
+    string line = read_line_or_throw("num_epochs");
+    ret_meta.num_epochs = parse_int_or_throw(line, "num_epochs");
 
-    std::getline(input_file, line);
+    line = read_line_or_throw("checkpoint_id");
+    ret_meta.checkpoint_id = parse_int_or_throw(line, "checkpoint_id");
+
+    line = read_line_or_throw("link_prediction");
     std::istringstream(line) >> ret_meta.link_prediction;
 
-    std::getline(input_file, line);
+    line = read_line_or_throw("has_state");
     std::istringstream(line) >> ret_meta.has_state;
 
-    std::getline(input_file, line);
+    line = read_line_or_throw("has_encoded");
     std::istringstream(line) >> ret_meta.has_encoded;
 
-    std::getline(input_file, line);
+    line = read_line_or_throw("has_model");
     std::istringstream(line) >> ret_meta.has_model;
 
     return ret_meta;

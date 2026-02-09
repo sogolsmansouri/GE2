@@ -394,7 +394,12 @@ class GraphModelStorage {
         train_ = false;
 
         if (instance_of<Storage, MemPartitionBufferStorage>(storage_ptrs_.node_embeddings)) {
-            storage_ptrs_.node_embeddings->device_ = torch::kCPU;
+            // MEM_PARTITION_BUFFER lookups are local-buffer indices and must remain on GPU in eval.
+            storage_ptrs_.node_embeddings->device_ = torch::kCUDA;
+        }
+
+        if (storage_ptrs_.node_embeddings_g != nullptr && instance_of<Storage, MemPartitionBufferStorage>(storage_ptrs_.node_embeddings_g)) {
+            storage_ptrs_.node_embeddings_g->device_ = torch::kCUDA;
         }
 
         if (storage_ptrs_.validation_edges != nullptr) {
@@ -410,7 +415,12 @@ class GraphModelStorage {
         train_ = false;
         
         if (instance_of<Storage, MemPartitionBufferStorage>(storage_ptrs_.node_embeddings)) {
-            storage_ptrs_.node_embeddings->device_ = torch::kCPU;
+            // MEM_PARTITION_BUFFER lookups are local-buffer indices and must remain on GPU in eval.
+            storage_ptrs_.node_embeddings->device_ = torch::kCUDA;
+        }
+
+        if (storage_ptrs_.node_embeddings_g != nullptr && instance_of<Storage, MemPartitionBufferStorage>(storage_ptrs_.node_embeddings_g)) {
+            storage_ptrs_.node_embeddings_g->device_ = torch::kCUDA;
         }
 
         if (storage_ptrs_.test_edges != nullptr) {

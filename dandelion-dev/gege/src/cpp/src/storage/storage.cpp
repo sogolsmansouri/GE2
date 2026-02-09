@@ -15,6 +15,23 @@
 using std::ios;
 using std::ios_base;
 
+namespace {
+class CudaDeviceRestoreGuard {
+   public:
+    CudaDeviceRestoreGuard() : restore_(cudaGetDevice(&device_) == cudaSuccess) {}
+
+    ~CudaDeviceRestoreGuard() {
+        if (restore_) {
+            cudaSetDevice(device_);
+        }
+    }
+
+   private:
+    int device_ = -1;
+    bool restore_ = false;
+};
+}  // namespace
+
 void renameFile(string old_filename, string new_filename) {
     int result = rename(old_filename.c_str(), new_filename.c_str());
     if (result != 0) {
@@ -226,6 +243,8 @@ void MemPartitionBufferStorage::enablePeerAccess_() {
         return;
     }
 
+    CudaDeviceRestoreGuard device_guard;
+
     for (int i = 0; i < devices_.size(); i++) {
         int src = devices_[i].index();
         cudaSetDevice(src);
@@ -257,6 +276,8 @@ void MemPartitionBufferStorage::enablePeerAccess_() {
 }
 
 void MemPartitionBufferStorage::performNextSwapP2P_() {
+    CudaDeviceRestoreGuard device_guard;
+
     int num_devices = static_cast<int>(devices_.size());
     std::vector<torch::Tensor> current_states(num_devices);
     std::vector<torch::Tensor> next_states(num_devices);
@@ -502,7 +523,10 @@ void MemPartitionBufferStorage::unload(bool perform_write, int32_t device_idx) {
 
 torch::Tensor MemPartitionBufferStorage::indexRead(Indices indices) { 
     if(device_ == torch::kCUDA) {
-        return buffers_[0]->indexRead(indices);
+        torch::Tensor indices_on_device = indices.to(devices_[0], true);
+        CudaDeviceRestoreGuard device_guard;
+        cudaSetDevice(devices_[0].index());
+        return buffers_[0]->indexRead(indices_on_device);
     } else { 
         if (indices.sizes().size() != 1) {
             // TODO: throw invalid input to func exception
@@ -510,7 +534,7 @@ torch::Tensor MemPartitionBufferStorage::indexRead(Indices indices) {
         }
 
         if (data_.defined()) {
-            return data_.index_select(0, indices.to(devices_[0]));
+            return data_.index_select(0, indices.to(torch::kCPU));
         } else {
             return torch::Tensor();
         }
@@ -519,7 +543,10 @@ torch::Tensor MemPartitionBufferStorage::indexRead(Indices indices) {
 
 torch::Tensor MemPartitionBufferStorage::indexRead(Indices indices, int32_t device_idx) { 
     if(device_ == torch::kCUDA) {
-        return buffers_[device_idx]->indexRead(indices);
+        torch::Tensor indices_on_device = indices.to(devices_[device_idx], true);
+        CudaDeviceRestoreGuard device_guard;
+        cudaSetDevice(devices_[device_idx].index());
+        return buffers_[device_idx]->indexRead(indices_on_device);
     } else { 
         if (indices.sizes().size() != 1) {
             // TODO: throw invalid input to func exception
@@ -527,7 +554,7 @@ torch::Tensor MemPartitionBufferStorage::indexRead(Indices indices, int32_t devi
         }
         // std::cout << data_.device() << std::endl;
         if (data_.defined()) {
-            return data_.index_select(0, indices);
+            return data_.index_select(0, indices.to(torch::kCPU));
         } else {
             return torch::Tensor();
         }
