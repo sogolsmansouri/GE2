@@ -503,14 +503,20 @@ shared_ptr<Batch> DataLoader::getNextBatch(int32_t device_idx) {
         batch = nullptr;
         if (graph_storage_->useInMemorySubGraph()) {
             if (graph_storage_->hasSwap(device_idx)) {
+                // Training uses one consumer per configured device; synchronous evaluation consumes only device 0.
+                int swap_participants = train_ ? static_cast<int>(all_batches_.size()) : 1;
+                if (swap_participants <= 0) {
+                    swap_participants = 1;
+                }
+
                 // wait for all batches to finish before swapping
-                if (swap_tasks_completed == all_batches_.size()) {
+                if (swap_tasks_completed == swap_participants) {
                     swap_tasks_completed = 0;
                 }
                 // batch_cv_->wait(batch_lock, [this, device_idx] { 
                 //     return async_barrier.load() % all_batches_.size() == 0; });
                 // batch_lock.unlock();
-                while(async_barrier.load() % all_batches_.size() != 0) {
+                while(async_barrier.load() % swap_participants != 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
 
@@ -552,7 +558,7 @@ shared_ptr<Batch> DataLoader::getNextBatch(int32_t device_idx) {
                     device_swap_rounds_[device_idx] = next_round_id;
                 }
 
-                while(swap_tasks_completed.load() != all_batches_.size()) {
+                while(swap_tasks_completed.load() != swap_participants) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
                 // auto t2 = std::chrono::high_resolution_clock::now();
