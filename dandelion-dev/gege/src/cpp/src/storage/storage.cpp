@@ -230,6 +230,12 @@ MemPartitionBufferStorage::MemPartitionBufferStorage(string filename, int64_t di
     devices_ = devices;
     swap_waiting_ = 0;
     swap_generation_ = 0;
+    device_swap_rounds_.assign(devices_.size(), 0);
+    coordinated_swap_round_ = 0;
+    epoch_p2p_bytes_ = 0;
+    epoch_p2p_partition_copies_ = 0;
+    epoch_h2d_bytes_ = 0;
+    epoch_d2h_bytes_ = 0;
     for (int i = 0; i < devices_.size(); i ++) {
         MemPartitionBuffer* buffer = new MemPartitionBuffer(options_->buffer_capacity, options_->num_partitions, options_->fine_to_coarse_ratio, partition_size, dim1_size_, dim0_size_,
                                   dtype_, filename_, options_->prefetching, devices_[i], devices_.size());
@@ -313,6 +319,7 @@ void MemPartitionBufferStorage::performNextSwapP2P_() {
     }
 
     int transfer_ops = 0;
+    uint64_t transfer_bytes = 0;
     for (int dst_idx = 0; dst_idx < num_devices; dst_idx++) {
         int dst_device = devices_[dst_idx].index();
         char *dst_base = static_cast<char *>(next_gpu_views[dst_idx].data_ptr());
@@ -341,6 +348,7 @@ void MemPartitionBufferStorage::performNextSwapP2P_() {
             } else {
                 copy_err = cudaMemcpyPeerAsync(dst_ptr, dst_device, src_ptr, src_device, copy_bytes, 0);
                 transfer_ops++;
+                transfer_bytes += static_cast<uint64_t>(copy_bytes);
             }
             if (copy_err != cudaSuccess) {
                 SPDLOG_ERROR("P2P copy failed for p{} {}:{} -> {}:{} with error {}", part_id, src_idx, src_slot, dst_idx, dst_slot,
@@ -365,12 +373,42 @@ void MemPartitionBufferStorage::performNextSwapP2P_() {
             buffers_[device_idx]->finalizeExternalSwap(next_states[device_idx], true);
         }
     }
+    uint64_t round_id = 0;
+    {
+        std::lock_guard<std::mutex> lock(comm_stats_mutex_);
+        coordinated_swap_round_++;
+        round_id = coordinated_swap_round_;
+        epoch_p2p_bytes_ += transfer_bytes;
+        epoch_p2p_partition_copies_ += static_cast<uint64_t>(transfer_ops);
+    }
+    SPDLOG_INFO("Swap comm round {} [P2P] storage={} inter_gpu_partition_copies={} inter_gpu_bytes={} ({:.2f} MiB)",
+                round_id, filename_, transfer_ops, transfer_bytes, static_cast<double>(transfer_bytes) / (1024.0 * 1024.0));
     SPDLOG_INFO("P2P coordinated swap completed with {} inter-GPU partition copies", transfer_ops);
 }
 
 void MemPartitionBufferStorage::performNextSwap(int32_t device_idx) {
     if (!inter_gpu_swap_ || devices_.size() <= 1) {
+        if (!buffers_[device_idx]->hasSwap()) {
+            return;
+        }
+        uint64_t one_way_bytes = static_cast<uint64_t>(buffers_[device_idx]->getSlotBytes()) * static_cast<uint64_t>(options_->buffer_capacity);
         buffers_[device_idx]->performNextSwap();
+        uint64_t round_id = 0;
+        {
+            std::lock_guard<std::mutex> lock(comm_stats_mutex_);
+            if (device_idx >= static_cast<int32_t>(device_swap_rounds_.size())) {
+                device_swap_rounds_.resize(device_idx + 1, 0);
+            }
+            device_swap_rounds_[device_idx]++;
+            round_id = device_swap_rounds_[device_idx];
+            epoch_h2d_bytes_ += one_way_bytes;
+            epoch_d2h_bytes_ += one_way_bytes;
+        }
+        SPDLOG_INFO("Swap comm round {} [CPU<->GPU] storage={} device={} d2h_bytes={} ({:.2f} MiB) h2d_bytes={} ({:.2f} MiB) total_bytes={} ({:.2f} MiB)",
+                    round_id, filename_, device_idx,
+                    one_way_bytes, static_cast<double>(one_way_bytes) / (1024.0 * 1024.0),
+                    one_way_bytes, static_cast<double>(one_way_bytes) / (1024.0 * 1024.0),
+                    one_way_bytes * 2, static_cast<double>(one_way_bytes * 2) / (1024.0 * 1024.0));
         return;
     }
 
@@ -401,6 +439,32 @@ void MemPartitionBufferStorage::performNextSwap(int32_t device_idx) {
     }
 
     swap_cv_.wait(lock, [this, generation] { return swap_generation_ != generation; });
+}
+
+void MemPartitionBufferStorage::logEpochCommStatsAndReset(const std::string &label, int64_t epoch_id) {
+    uint64_t p2p_bytes = 0;
+    uint64_t p2p_copies = 0;
+    uint64_t h2d_bytes = 0;
+    uint64_t d2h_bytes = 0;
+    {
+        std::lock_guard<std::mutex> lock(comm_stats_mutex_);
+        p2p_bytes = epoch_p2p_bytes_;
+        p2p_copies = epoch_p2p_partition_copies_;
+        h2d_bytes = epoch_h2d_bytes_;
+        d2h_bytes = epoch_d2h_bytes_;
+        epoch_p2p_bytes_ = 0;
+        epoch_p2p_partition_copies_ = 0;
+        epoch_h2d_bytes_ = 0;
+        epoch_d2h_bytes_ = 0;
+    }
+    uint64_t total_bytes = p2p_bytes + h2d_bytes + d2h_bytes;
+    SPDLOG_INFO("Comm summary epoch {} [{}] storage={} p2p_bytes={} ({:.2f} GiB) p2p_partition_copies={} d2h_bytes={} ({:.2f} GiB) h2d_bytes={} ({:.2f} GiB) total_bytes={} ({:.2f} GiB)",
+                epoch_id, label, filename_,
+                p2p_bytes, static_cast<double>(p2p_bytes) / (1024.0 * 1024.0 * 1024.0),
+                p2p_copies,
+                d2h_bytes, static_cast<double>(d2h_bytes) / (1024.0 * 1024.0 * 1024.0),
+                h2d_bytes, static_cast<double>(h2d_bytes) / (1024.0 * 1024.0 * 1024.0),
+                total_bytes, static_cast<double>(total_bytes) / (1024.0 * 1024.0 * 1024.0));
 }
 
 

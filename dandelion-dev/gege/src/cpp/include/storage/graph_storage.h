@@ -291,6 +291,23 @@ class GraphModelStorage {
         }
     }
 
+    void logEpochCommunicationStatsAndReset(int64_t epoch_id) {
+        auto log_mem_storage = [epoch_id](shared_ptr<Storage> storage, const std::string &label) {
+            if (storage != nullptr && instance_of<Storage, MemPartitionBufferStorage>(storage)) {
+                std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage)->logEpochCommStatsAndReset(label, epoch_id);
+            }
+        };
+
+        log_mem_storage(storage_ptrs_.node_embeddings, "node_embeddings");
+        if (train_) {
+            log_mem_storage(storage_ptrs_.node_optimizer_state, "node_optimizer_state");
+        }
+        log_mem_storage(storage_ptrs_.node_embeddings_g, "node_embeddings_g");
+        if (train_) {
+            log_mem_storage(storage_ptrs_.node_optimizer_state_g, "node_optimizer_state_g");
+        }
+    }
+
     void setBufferOrdering(vector<torch::Tensor> buffer_states) {
         if (storage_ptrs_.node_embeddings != nullptr && (instance_of<Storage, PartitionBufferStorage>(storage_ptrs_.node_embeddings))) {
             std::dynamic_pointer_cast<PartitionBufferStorage>(storage_ptrs_.node_embeddings)->setBufferOrdering(buffer_states);

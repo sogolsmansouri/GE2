@@ -89,6 +89,8 @@ void SynchronousTrainer::train(int num_epochs) {
         }
         SPDLOG_INFO("################ Finished training epoch {} ################", dataloader_->getEpochsProcessed() + 1);
         timer.stop();
+
+        dataloader_->graph_storage_->logEpochCommunicationStatsAndReset(dataloader_->getEpochsProcessed() + 1);
         
         // notify that the epoch has been completed
         dataloader_->nextEpoch();
@@ -233,6 +235,8 @@ void SynchronousMultiGPUTrainer::train(int num_epochs) {
 
         SPDLOG_INFO("################ Finished training epoch {} ################", dataloader_->getEpochsProcessed() + 1);
         timer.stop();
+
+        dataloader_->graph_storage_->logEpochCommunicationStatsAndReset(dataloader_->getEpochsProcessed() + 1);
         // notify that the epoch has been completed
         dataloader_->nextEpoch();
         progress_reporter_->clear();

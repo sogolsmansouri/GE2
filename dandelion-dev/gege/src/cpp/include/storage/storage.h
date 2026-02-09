@@ -7,6 +7,7 @@
 #include <iostream>
 #include <condition_variable>
 #include <mutex>
+#include <cstdint>
 
 #include "common/datatypes.h"
 #include "data/batch.h"
@@ -135,6 +136,8 @@ class MemPartitionBufferStorage : public Storage {
 
     void performNextSwap(int32_t device_idx);
 
+    void logEpochCommStatsAndReset(const std::string &label, int64_t epoch_id);
+
     torch::Tensor getGlobalToLocalMap(bool get_current, int32_t device_idx = 0) { return buffers_[device_idx]->getGlobalToLocalMap(get_current); }
 
     void sync(int device_idx = 0) { buffers_[device_idx]->sync(); }
@@ -162,6 +165,14 @@ class MemPartitionBufferStorage : public Storage {
     std::condition_variable swap_cv_;
     int swap_waiting_;
     int swap_generation_;
+
+    std::mutex comm_stats_mutex_;
+    std::vector<uint64_t> device_swap_rounds_;
+    uint64_t coordinated_swap_round_;
+    uint64_t epoch_p2p_bytes_;
+    uint64_t epoch_p2p_partition_copies_;
+    uint64_t epoch_h2d_bytes_;
+    uint64_t epoch_d2h_bytes_;
 
     void enablePeerAccess_();
     void performNextSwapP2P_();
