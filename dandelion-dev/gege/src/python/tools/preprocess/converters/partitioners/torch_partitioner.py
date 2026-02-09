@@ -17,10 +17,12 @@ def partition_edges(edges, num_nodes, num_partitions):
     src_partitions = edges[:, 0] // partition_size
     dst_partitions = edges[:, -1] // partition_size
 
-    _, dst_args = torch.sort(dst_partitions, stable=True)
-    _, src_args = torch.sort(src_partitions[dst_args], stable=True)
+    # Older PyTorch versions do not support stable sort. Sort directly by
+    # edge-bucket id to group edges by (src_partition, dst_partition).
+    bucket_ids = src_partitions * num_partitions + dst_partitions
+    _, bucket_args = torch.sort(bucket_ids, 0, False)
 
-    edges = edges[dst_args[src_args]]
+    edges = edges[bucket_args]
     edge_bucket_ids = edges // partition_size
 
     offsets = np.zeros([num_partitions, num_partitions], dtype=int)
