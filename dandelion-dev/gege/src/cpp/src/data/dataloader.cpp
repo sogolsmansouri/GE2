@@ -15,6 +15,7 @@ DataLoader::DataLoader(shared_ptr<GraphModelStorage> graph_storage, LearningTask
     batches_processed_ = 0;
     false_negative_edges = 0;
     swap_tasks_completed = 0;
+    loaded_subgraphs = 0;
     sampler_lock_ = new std::mutex();
     batch_lock_ = new std::mutex;
     batch_cv_ = new std::condition_variable;
@@ -92,6 +93,7 @@ DataLoader::DataLoader(shared_ptr<GraphModelStorage> graph_storage, LearningTask
     epochs_processed_ = 0;
     false_negative_edges = 0;
     batches_processed_ = 0;
+    loaded_subgraphs = 0;
     sampler_lock_ = new std::mutex();
     batch_lock_ = new std::mutex;
     batch_cv_ = new std::condition_variable;
@@ -131,6 +133,7 @@ void DataLoader::nextEpoch() {
     batch_id_offset_ = 0;
     total_batches_processed_ = 0;
     epochs_processed_++;
+    loaded_subgraphs = 0;
     buffer_states_.clear();
     if (graph_storage_->useInMemorySubGraph()) {
         unloadStorage();
@@ -876,6 +879,8 @@ void DataLoader::updateEmbeddingsG(shared_ptr<Batch> batch, bool gpu, int32_t de
 }
 
 void DataLoader::loadStorage() {
+    loaded_subgraphs = 0;
+    async_barrier = 0;
     setBufferOrdering();
     graph_storage_->load();
     if (negative_sampling_method_ == NegativeSamplingMethod::GAN) {

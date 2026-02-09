@@ -577,7 +577,8 @@ torch::Tensor PartitionBuffer::getGlobalToLocalMap(bool get_current) {
             int partition_id = buffer_state[i].item<int>();
             Partition *partition = partition_table_[partition_id];
             int64_t partition_offset = partition->idx_offset_;
-            int64_t buffer_offset = partition->buffer_idx_ * partition_size_;
+            // buffer_state_ slot i corresponds to the i-th partition block in buffer_tensor_view_.
+        int64_t buffer_offset = i * partition_size_;
             buffer_index_map.slice(0, partition_offset, partition_offset + partition->partition_size_) =
                 torch::arange(buffer_offset, buffer_offset + partition->partition_size_);
         }
@@ -753,7 +754,7 @@ void MemPartitionBuffer::load(torch::Tensor data_storage) {
         void* tensor_mem_ = data_storage_.data_ptr();
 
 #pragma omp parallel for
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < buffer_state_.size(0); i++) {
             int partition_id = buffer_state_[i].item<int>();
             Partition *partition = partition_table_[partition_id];
             // void *buff_addr = (char *)buff_mem_ + (i * partition_size_ * embedding_size_ * dtype_size_);
@@ -845,7 +846,7 @@ void MemPartitionBuffer::sync() {
     auto t1 = std::chrono::high_resolution_clock::now();
     void* tensor_mem_ = data_storage_.data_ptr();
 #pragma omp parallel for
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < buffer_state_.size(0); i++) {
         int partition_id = buffer_state_[i].item<int>();
         Partition *partition = partition_table_[partition_id];
         int64_t buffer_offset = partition->buffer_idx_ * partition_size_;
@@ -862,6 +863,7 @@ void MemPartitionBuffer::sync() {
         partition->data_ptr_ = nullptr;
         // partition->tensor_ = torch::Tensor();
         partition->present_ = false;
+        partition->buffer_idx_ = -1;
     }
     auto t2 = std::chrono::high_resolution_clock::now();
     // SPDLOG_INFO("Sync time: {}", std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count());

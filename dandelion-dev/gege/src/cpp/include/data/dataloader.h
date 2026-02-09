@@ -235,6 +235,8 @@ class DataLoader {
         } else {
             batch_size_ = evaluation_config_->batch_size;
             train_ = false;
+            loaded_subgraphs = 0;
+            async_barrier = 0;
             graph_storage_->setValidationSet();
             negative_sampler_ = evaluation_negative_sampler_;
             neighbor_sampler_ = evaluation_neighbor_sampler_;
@@ -248,6 +250,8 @@ class DataLoader {
         } else {
             batch_size_ = evaluation_config_->batch_size;
             train_ = false;
+            loaded_subgraphs = 0;
+            async_barrier = 0;
             graph_storage_->setTestSet();
             negative_sampler_ = evaluation_negative_sampler_;
             neighbor_sampler_ = evaluation_neighbor_sampler_;
@@ -257,11 +261,15 @@ class DataLoader {
 
     void setEncode() {
         if (single_dataset_) {
+            loaded_subgraphs = 0;
+            async_barrier = 0;
             loadStorage();
             initializeBatches(true);
         } else {
             batch_size_ = evaluation_config_->batch_size;
             train_ = false;
+            loaded_subgraphs = 0;
+            async_barrier = 0;
             graph_storage_->setTrainSet();
             neighbor_sampler_ = evaluation_neighbor_sampler_;
             loadStorage();

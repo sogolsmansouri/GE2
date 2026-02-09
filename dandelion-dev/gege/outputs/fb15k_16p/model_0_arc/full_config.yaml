@@ -1,5 +1,5 @@
 model:
-  random_seed: 6767442212846975450
+  random_seed: 8037971720176188725
   learning_task: LINK_PREDICTION
   encoder:
     layers:
@@ -115,19 +115,19 @@ storage:
   model_dir: /mnt/beegfs/smansou2/GE2/dandelion-dev/gege/outputs/fb15k_16p/model_0_arc/
   log_level: info
 training:
-  batch_size: 2000
+  batch_size: 10000
   negative_sampling_method: RNS
   negative_sampling_selected_ratio: 1.0
   negative_sampling:
     num_chunks: 10
-    negatives_per_positive: 200
+    negatives_per_positive: 1000
     degree_fraction: 0.5
     filtered: false
     local_filter_mode: DEG
-  num_epochs: 10
+  num_epochs: 5
   epochs_per_shuffle: 1
   logs_per_epoch: 10
-  save_model: false
+  save_model: true
   checkpoint:
     save_best: false
     interval: -1
@@ -138,9 +138,9 @@ evaluation:
   batch_size: 1000
   negative_sampling:
     num_chunks: 1
-    negatives_per_positive: 200
+    negatives_per_positive: 1000
     degree_fraction: 0.0
     filtered: true
     local_filter_mode: DEG
-  epochs_per_eval: 2
+  epochs_per_eval: 5
   checkpoint_dir: ''

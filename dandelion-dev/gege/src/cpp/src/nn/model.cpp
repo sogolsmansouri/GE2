@@ -4,6 +4,8 @@
 #include <torch/csrc/cuda/nccl.h>
 #endif
 
+#include <fstream>
+
 #include "configuration/constants.h"
 #include "configuration/options.h"
 #include "data/samplers/negative.h"
@@ -100,18 +102,20 @@ void Model::save(std::string directory) {
     torch::serialize::OutputArchive model_archive;
     torch::serialize::OutputArchive state_archive;
 
-    std::dynamic_pointer_cast<torch::nn::Module>(encoder_)->save(model_archive);
-
-    if (decoder_ != nullptr) {
-        for(auto& model : device_models_) {
-            torch::serialize::OutputArchive model_archive;
-            std::dynamic_pointer_cast<torch::nn::Module>(model->decoder_)->save(model_archive);
-            model_archive.save_to(model_filename + "_" + std::to_string(model->device_.index()));
-        }
+    // Save a canonical model archive that gege_eval can reload directly.
+    if (!device_models_.empty() && device_models_[0]->encoder_ != nullptr) {
+        std::dynamic_pointer_cast<torch::nn::Module>(device_models_[0]->encoder_)->save(model_archive);
+    } else if (encoder_ != nullptr) {
+        std::dynamic_pointer_cast<torch::nn::Module>(encoder_)->save(model_archive);
     }
 
-    // Outputs each optimizer as a <K, V> pair, where key is the loop counter and value
-    // is the optimizer itself. in Model::load, Optimizer::load is called on each key.
+    if (!device_models_.empty() && device_models_[0]->decoder_ != nullptr) {
+        std::dynamic_pointer_cast<torch::nn::Module>(device_models_[0]->decoder_)->save(model_archive);
+    } else if (decoder_ != nullptr) {
+        std::dynamic_pointer_cast<torch::nn::Module>(decoder_)->save(model_archive);
+    }
+    model_archive.save_to(model_filename);
+
     int32_t count = 0;
     for(auto& model : device_models_) {
         for (int i = 0; i < model->optimizers_.size(); i++) {
@@ -130,7 +134,19 @@ void Model::load(std::string directory, bool train) {
     torch::serialize::InputArchive model_archive;
     torch::serialize::InputArchive state_archive;
 
-    model_archive.load_from(model_filename);
+    // Backward-compatible fallback: older checkpoints may only have model.pt_0.
+    std::string model_archive_path = model_filename;
+    std::ifstream model_file_stream(model_archive_path);
+    if (!model_file_stream.good()) {
+        std::string legacy_model_archive_path = model_filename + "_0";
+        std::ifstream legacy_file_stream(legacy_model_archive_path);
+        if (legacy_file_stream.good()) {
+            SPDLOG_WARN("Model::load falling back to legacy checkpoint file {}", legacy_model_archive_path);
+            model_archive_path = legacy_model_archive_path;
+        }
+    }
+
+    model_archive.load_from(model_archive_path);
 
     if (train) {
         state_archive.load_from(model_state_filename);
@@ -140,16 +156,18 @@ void Model::load(std::string directory, bool train) {
     for (auto key : state_archive.keys()) {
         torch::serialize::InputArchive tmp_state_archive;
         state_archive.read(key, tmp_state_archive);
-        // optimizers have already been created as part of initModelFromConfig
         optimizers_[optimizer_idx++]->load(tmp_state_archive);
     }
 
-    std::dynamic_pointer_cast<torch::nn::Module>(encoder_)->load(model_archive);
+    if (encoder_ != nullptr) {
+        std::dynamic_pointer_cast<torch::nn::Module>(encoder_)->load(model_archive);
+    }
 
     if (decoder_ != nullptr) {
         std::dynamic_pointer_cast<torch::nn::Module>(decoder_)->load(model_archive);
     }
 }
+
 
 void Model::all_reduce_rel() {
     SPDLOG_INFO("all_reduce_rel");

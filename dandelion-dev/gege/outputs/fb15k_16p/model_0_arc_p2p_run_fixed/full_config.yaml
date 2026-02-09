@@ -1,0 +1,131 @@
+model:
+  random_seed: 9176134762689727180
+  learning_task: LINK_PREDICTION
+  encoder:
+    layers:
+    - - type: EMBEDDING
+        options: {}
+        input_dim: -1
+        output_dim: 100
+        init:
+          type: GLOROT_UNIFORM
+          options: {}
+        optimizer:
+          type: DEFAULT
+          options:
+            learning_rate: 0.1
+            eps: 1.0e-10
+            init_value: 0.0
+            lr_decay: 0.0
+            weight_decay: 0.0
+        bias: false
+        bias_init:
+          type: ZEROS
+          options: {}
+        activation: NONE
+    train_neighbor_sampling: []
+    eval_neighbor_sampling: []
+    embedding_dim: 100
+  decoder:
+    type: DISTMULT
+    options:
+      inverse_edges: true
+      use_relation_features: false
+      edge_decoder_method: CORRUPT_NODE
+    optimizer:
+      type: ADAGRAD
+      options:
+        learning_rate: 0.1
+        eps: 1.0e-10
+        init_value: 0.0
+        lr_decay: 0.0
+        weight_decay: 0.0
+  loss:
+    type: SOFTMAX_CE
+    options:
+      reduction: SUM
+  dense_optimizer:
+    type: ADAM
+    options:
+      learning_rate: 0.1
+      amsgrad: false
+      beta_1: 0.9
+      beta_2: 0.999
+      eps: 1.0e-08
+      weight_decay: 0.0
+  sparse_optimizer:
+    type: ADAGRAD
+    options:
+      learning_rate: 0.1
+      eps: 1.0e-10
+      init_value: 0.0
+      lr_decay: 0.0
+      weight_decay: 0.0
+storage:
+  device_type: cuda
+  device_ids:
+  - 0
+  dataset:
+    dataset_dir: /mnt/beegfs/smansou2/GE2/dandelion-dev/gege/datasets/fb15k_16p/
+    num_edges: 483142
+    num_nodes: 14951
+    num_relations: 1345
+    num_train: 483142
+    num_valid: 50000
+    num_test: 59071
+    node_feature_dim: -1
+    rel_feature_dim: -1
+    num_classes: -1
+    initialized: false
+  edges:
+    type: HOST_MEMORY
+    options:
+      dtype: int
+  nodes:
+    type: DEVICE_MEMORY
+    options:
+      dtype: int
+  embeddings:
+    type: DEVICE_MEMORY
+    options:
+      dtype: float
+  features:
+    type: DEVICE_MEMORY
+    options:
+      dtype: float
+  prefetch: false
+  shuffle_input: true
+  full_graph_evaluation: true
+  export_encoded_nodes: false
+  model_dir: /mnt/beegfs/smansou2/GE2/dandelion-dev/gege/outputs/fb15k_16p/model_0_arc_p2p_run_fixed/
+  log_level: info
+training:
+  batch_size: 2000
+  negative_sampling_method: RNS
+  negative_sampling_selected_ratio: 1.0
+  negative_sampling:
+    num_chunks: 10
+    negatives_per_positive: 200
+    degree_fraction: 0.5
+    filtered: false
+    local_filter_mode: DEG
+  num_epochs: 5
+  epochs_per_shuffle: 1
+  logs_per_epoch: 10
+  save_model: true
+  checkpoint:
+    save_best: false
+    interval: -1
+    save_state: false
+  resume_training: false
+  resume_from_checkpoint: ''
+evaluation:
+  batch_size: 1000
+  negative_sampling:
+    num_chunks: 1
+    negatives_per_positive: 200
+    degree_fraction: 0.0
+    filtered: false
+    local_filter_mode: DEG
+  epochs_per_eval: 5
+  checkpoint_dir: /mnt/beegfs/smansou2/GE2/dandelion-dev/gege/outputs/fb15k_16p/model_0_arc_p2p_run_fixed/

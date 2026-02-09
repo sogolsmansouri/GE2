@@ -245,7 +245,10 @@ void MemPartitionBufferStorage::enablePeerAccess_() {
                 continue;
             }
             cudaError_t enable_err = cudaDeviceEnablePeerAccess(dst, 0);
-            if (enable_err != cudaSuccess && enable_err != cudaErrorPeerAccessAlreadyEnabled) {
+            if (enable_err == cudaErrorPeerAccessAlreadyEnabled) {
+                // Clear sticky CUDA error state when peer access was previously enabled.
+                cudaGetLastError();
+            } else if (enable_err != cudaSuccess) {
                 SPDLOG_WARN("cudaDeviceEnablePeerAccess failed for {} -> {}: {}", src, dst, cudaGetErrorString(enable_err));
             }
         }
