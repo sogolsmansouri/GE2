@@ -211,6 +211,24 @@ void DataLoader::setActiveEdges(int32_t device_idx) {
     } else {
         active_edges = graph_storage_->storage_ptrs_.edges->range(0, graph_storage_->storage_ptrs_.edges->getDim0());
     }
+
+    // Defensive guard: if subgraph mapping produced invalid endpoints, drop those
+    // rows before batching so we do not propagate -1 node ids downstream.
+    if (active_edges.defined() && active_edges.size(0) > 0 && active_edges.size(1) >= 2) {
+        torch::Tensor invalid_src = active_edges.select(1, 0).lt(0);
+        torch::Tensor invalid_dst = active_edges.select(1, -1).lt(0);
+        torch::Tensor invalid_mask = invalid_src.logical_or(invalid_dst);
+        int64_t invalid_edges = invalid_mask.sum().item<int64_t>();
+        if (invalid_edges > 0) {
+            torch::Tensor valid_idx = torch::nonzero(invalid_mask.logical_not()).flatten(0, 1);
+            SPDLOG_WARN("setActiveEdges: device={} dropping {} / {} edges with unmapped endpoints", device_idx, invalid_edges, active_edges.size(0));
+            if (valid_idx.numel() == 0) {
+                throw std::runtime_error("No valid mapped edges remain in active subgraph");
+            }
+            active_edges = active_edges.index_select(0, valid_idx);
+        }
+    }
+
     auto opts = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
     auto perm = torch::randperm(active_edges.size(0), opts);
     perm = perm.to(active_edges.device());

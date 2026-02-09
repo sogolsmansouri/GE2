@@ -577,8 +577,13 @@ torch::Tensor PartitionBuffer::getGlobalToLocalMap(bool get_current) {
             int partition_id = buffer_state[i].item<int>();
             Partition *partition = partition_table_[partition_id];
             int64_t partition_offset = partition->idx_offset_;
-            // buffer_state_ slot i corresponds to the i-th partition block in buffer_tensor_view_.
-        int64_t buffer_offset = i * partition_size_;
+            // Prefer the explicit slot index tracked on the partition; fall back to
+            // the state position if the slot marker is stale.
+            int64_t slot_idx = partition->buffer_idx_;
+            if (slot_idx < 0 || slot_idx >= capacity_) {
+                slot_idx = i;
+            }
+            int64_t buffer_offset = slot_idx * partition_size_;
             buffer_index_map.slice(0, partition_offset, partition_offset + partition->partition_size_) =
                 torch::arange(buffer_offset, buffer_offset + partition->partition_size_);
         }
@@ -738,7 +743,11 @@ torch::Tensor MemPartitionBuffer::getGlobalToLocalMap(bool get_current) {
         int partition_id = buffer_state[i].item<int>();
         Partition *partition = partition_table_[partition_id];
         int64_t partition_offset = partition->idx_offset_;
-        int64_t buffer_offset = static_cast<int64_t>(i) * partition_size_;
+        int64_t slot_idx = partition->buffer_idx_;
+        if (slot_idx < 0 || slot_idx >= capacity_) {
+            slot_idx = i;
+        }
+        int64_t buffer_offset = slot_idx * partition_size_;
         buffer_index_map.index_put_({pos_.slice(0, partition_offset, partition_offset + partition->partition_size_)}, 
                                                 torch::arange(buffer_offset, buffer_offset + partition->partition_size_));
     }
@@ -849,9 +858,13 @@ void MemPartitionBuffer::sync() {
     for (int i = 0; i < buffer_state_.size(0); i++) {
         int partition_id = buffer_state_[i].item<int>();
         Partition *partition = partition_table_[partition_id];
-        // In this loop we iterate over the current buffer slots directly.
-        // Using the loop index is robust even if partition->buffer_idx_ gets stale.
-        int64_t buffer_offset = static_cast<int64_t>(i) * partition_size_;
+        // Prefer the explicit slot index tracked on the partition; fall back to
+        // the state position if the slot marker is stale.
+        int64_t slot_idx = partition->buffer_idx_;
+        if (slot_idx < 0 || slot_idx >= capacity_) {
+            slot_idx = i;
+        }
+        int64_t buffer_offset = slot_idx * partition_size_;
         // void *tensor_addr = (char *)tensor_mem_ + (partition->idx_offset_ * embedding_size_ * dtype_size_);
         // void *buff_addr = (char *)buff_mem_unload_ + (i * partition_size_ * embedding_size_ * dtype_size_);
 
