@@ -5,6 +5,7 @@
 #endif
 
 #include <fstream>
+#include <algorithm>
 
 #include "configuration/constants.h"
 #include "configuration/options.h"
@@ -152,11 +153,43 @@ void Model::load(std::string directory, bool train) {
         state_archive.load_from(model_state_filename);
     }
 
-    int optimizer_idx = 0;
-    for (auto key : state_archive.keys()) {
-        torch::serialize::InputArchive tmp_state_archive;
-        state_archive.read(key, tmp_state_archive);
-        optimizers_[optimizer_idx++]->load(tmp_state_archive);
+    if (train) {
+        // In multi-GPU checkpoints, optimizer states are saved for each device-model replica.
+        // Load in the same flattened order used by save().
+        std::vector<std::shared_ptr<Optimizer>> target_optimizers;
+        for (auto &device_model : device_models_) {
+            if (device_model == nullptr) {
+                continue;
+            }
+            for (auto &optim : device_model->optimizers_) {
+                target_optimizers.emplace_back(optim);
+            }
+        }
+        if (target_optimizers.empty()) {
+            for (auto &optim : optimizers_) {
+                target_optimizers.emplace_back(optim);
+            }
+        }
+
+        auto keys = state_archive.keys();
+        std::sort(keys.begin(), keys.end(), [](const std::string &a, const std::string &b) {
+            return std::stoi(a) < std::stoi(b);
+        });
+
+        if (keys.size() > target_optimizers.size()) {
+            SPDLOG_WARN("Checkpoint contains {} optimizer states, but model has {} optimizer slots. Extra states will be ignored.", keys.size(),
+                        target_optimizers.size());
+        } else if (keys.size() < target_optimizers.size()) {
+            SPDLOG_WARN("Checkpoint contains {} optimizer states, but model expects {}. Remaining optimizer slots keep initialized state.", keys.size(),
+                        target_optimizers.size());
+        }
+
+        int64_t num_to_load = std::min(keys.size(), target_optimizers.size());
+        for (int64_t i = 0; i < num_to_load; i++) {
+            torch::serialize::InputArchive tmp_state_archive;
+            state_archive.read(keys[i], tmp_state_archive);
+            target_optimizers[i]->load(tmp_state_archive);
+        }
     }
 
     if (encoder_ != nullptr) {
