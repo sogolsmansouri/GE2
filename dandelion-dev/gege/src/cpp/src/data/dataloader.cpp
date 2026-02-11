@@ -925,8 +925,12 @@ void DataLoader::loadGPUParameters(shared_ptr<Batch> batch, int32_t device_idx) 
 void DataLoader::updateEmbeddings(shared_ptr<Batch> batch, bool gpu, int32_t device_idx) {
     if (gpu) {
         if (graph_storage_->storage_ptrs_.node_embeddings->device_ == torch::kCUDA) {
-            graph_storage_->updateAddNodeEmbeddings(batch->unique_node_indices_, batch->node_gradients_, device_idx);
-            graph_storage_->updateAddNodeEmbeddingState(batch->unique_node_indices_, batch->node_state_update_, device_idx);
+            bool fused_applied =
+                graph_storage_->updateAddNodeEmbeddingsAndStateFused(batch->unique_node_indices_, batch->node_gradients_, batch->node_state_update_, device_idx);
+            if (!fused_applied) {
+                graph_storage_->updateAddNodeEmbeddings(batch->unique_node_indices_, batch->node_gradients_, device_idx);
+                graph_storage_->updateAddNodeEmbeddingState(batch->unique_node_indices_, batch->node_state_update_, device_idx);
+            }
         }
     } else {
         batch->host_transfer_.synchronize();

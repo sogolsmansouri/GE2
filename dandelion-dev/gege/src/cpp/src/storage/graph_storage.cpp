@@ -24,6 +24,17 @@ bool profile_timing_enabled() {
     }();
     return enabled;
 }
+
+bool fused_sparse_update_enabled() {
+    static const bool enabled = []() {
+        const char *env = std::getenv("GEGE_ENABLE_FUSED_SPARSE_UPDATE");
+        if (env == nullptr) {
+            return false;
+        }
+        return !(env[0] == '\0' || (env[0] == '0' && env[1] == '\0'));
+    }();
+    return enabled;
+}
 } // namespace
 
 GraphModelStorage::GraphModelStorage(GraphModelStoragePtrs storage_ptrs, shared_ptr<StorageConfig> storage_config) {
@@ -345,6 +356,38 @@ void GraphModelStorage::updateAddNodeEmbeddings(Indices indices, torch::Tensor v
     } else {
         std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_embeddings)->indexAdd(indices, values, device_idx);
     }
+}
+
+bool GraphModelStorage::updateAddNodeEmbeddingsAndStateFused(Indices indices,
+                                                             torch::Tensor embedding_values,
+                                                             torch::Tensor state_values,
+                                                             int32_t device_idx) {
+#ifdef GEGE_CUDA
+    if (!fused_sparse_update_enabled()) {
+        return false;
+    }
+    if (storage_ptrs_.node_embeddings == nullptr || storage_ptrs_.node_optimizer_state == nullptr) {
+        return false;
+    }
+    auto embeddings_storage = std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_embeddings);
+    auto state_storage = std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_optimizer_state);
+    if (!embeddings_storage || !state_storage) {
+        return false;
+    }
+    bool fused_ok = embeddings_storage->indexAddFused(indices, embedding_values, state_values, state_storage, device_idx);
+    static bool logged_enabled = false;
+    if (fused_ok && !logged_enabled) {
+        SPDLOG_INFO("Fused sparse embedding/state update enabled for MEM_PARTITION_BUFFER");
+        logged_enabled = true;
+    }
+    return fused_ok;
+#else
+    (void)indices;
+    (void)embedding_values;
+    (void)state_values;
+    (void)device_idx;
+    return false;
+#endif
 }
 
 void GraphModelStorage::updateAddNodeEmbeddingsG(Indices indices, torch::Tensor values, int32_t device_idx) {

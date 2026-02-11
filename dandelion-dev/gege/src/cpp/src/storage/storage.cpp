@@ -7,9 +7,12 @@
 #include <iostream>
 #include <algorithm>
 #include <unordered_map>
+#include <cstdlib>
+#include <atomic>
 
 #include "common/util.h"
 #include "configuration/constants.h"
+#include "fused_sparse_update.h"
 #include "reporting/logger.h"
 
 using std::ios;
@@ -632,6 +635,91 @@ void MemPartitionBufferStorage::indexAdd(Indices indices, torch::Tensor values) 
 
 void MemPartitionBufferStorage::indexAdd(Indices indices, torch::Tensor values, int32_t device_idx) { 
     return buffers_[device_idx]->indexAdd(indices, values); 
+}
+
+bool MemPartitionBufferStorage::indexAddFused(Indices indices,
+                                              torch::Tensor embedding_values,
+                                              torch::Tensor state_values,
+                                              const std::shared_ptr<MemPartitionBufferStorage> &state_storage,
+                                              int32_t device_idx) {
+#ifdef GEGE_CUDA
+    static const bool dedup_before_scatter = []() {
+        const char *env = std::getenv("GEGE_FUSED_SPARSE_DEDUP");
+        if (env == nullptr) {
+            return false;
+        }
+        return !(env[0] == '\0' || (env[0] == '0' && env[1] == '\0'));
+    }();
+    static const int64_t log_every = []() {
+        const char *env = std::getenv("GEGE_FUSED_SPARSE_LOG_EVERY");
+        if (env == nullptr || env[0] == '\0') {
+            return static_cast<int64_t>(200);
+        }
+        int64_t v = std::atoll(env);
+        if (v <= 0) {
+            return static_cast<int64_t>(0);
+        }
+        return v;
+    }();
+    static std::atomic<int64_t> call_count{0};
+    static std::atomic<int64_t> total_pre_nnz{0};
+    static std::atomic<int64_t> total_post_nnz{0};
+
+    if (!state_storage) {
+        return false;
+    }
+    if (device_ != torch::kCUDA || state_storage->device_ != torch::kCUDA) {
+        return false;
+    }
+    if (device_idx < 0 || device_idx >= static_cast<int32_t>(buffers_.size()) ||
+        device_idx >= static_cast<int32_t>(state_storage->buffers_.size())) {
+        return false;
+    }
+
+    int64_t pre_nnz = 0;
+    int64_t post_nnz = 0;
+    bool ok = gege_fused_sparse_add_cuda(buffers_[device_idx]->buffer_tensor_gpu_view_,
+                                         state_storage->buffers_[device_idx]->buffer_tensor_gpu_view_,
+                                         indices,
+                                         embedding_values,
+                                         state_values,
+                                         dedup_before_scatter,
+                                         &pre_nnz,
+                                         &post_nnz);
+    if (!ok) {
+        return false;
+    }
+
+    int64_t curr_call = call_count.fetch_add(1) + 1;
+    total_pre_nnz.fetch_add(pre_nnz);
+    total_post_nnz.fetch_add(post_nnz);
+
+    if (dedup_before_scatter && log_every > 0 && (curr_call % log_every == 0)) {
+        int64_t agg_pre = total_pre_nnz.load();
+        int64_t agg_post = total_post_nnz.load();
+        double this_ratio = pre_nnz > 0 ? static_cast<double>(post_nnz) / static_cast<double>(pre_nnz) : 1.0;
+        double agg_ratio = agg_pre > 0 ? static_cast<double>(agg_post) / static_cast<double>(agg_pre) : 1.0;
+        SPDLOG_INFO(
+            "FusedSparse dedup stats: call={} device={} step_pre_nnz={} step_post_nnz={} step_ratio={:.4f} agg_pre_nnz={} agg_post_nnz={} agg_ratio={:.4f}",
+            curr_call,
+            device_idx,
+            pre_nnz,
+            post_nnz,
+            this_ratio,
+            agg_pre,
+            agg_post,
+            agg_ratio);
+    }
+
+    return true;
+#else
+    (void)indices;
+    (void)embedding_values;
+    (void)state_values;
+    (void)state_storage;
+    (void)device_idx;
+    return false;
+#endif
 }
 
 void MemPartitionBufferStorage::rangePut(int64_t offset, int64_t n, torch::Tensor values) {

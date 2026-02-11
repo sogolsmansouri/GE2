@@ -131,6 +131,11 @@ class GraphModelStorage {
 
     void updateAddNodeEmbeddings(Indices indices, torch::Tensor values, int32_t device_idx = 0);
 
+    bool updateAddNodeEmbeddingsAndStateFused(Indices indices,
+                                              torch::Tensor embedding_values,
+                                              torch::Tensor state_values,
+                                              int32_t device_idx = 0);
+
     void updateAddNodeEmbeddingsG(Indices indices, torch::Tensor values, int32_t device_idx = 0);
 
     void updatePutEncodedNodes(Indices indices, torch::Tensor values);

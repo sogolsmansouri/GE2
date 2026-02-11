@@ -130,6 +130,12 @@ class MemPartitionBufferStorage : public Storage {
 
     void indexAdd(Indices indices, torch::Tensor values, int32_t device_idx);
 
+    bool indexAddFused(Indices indices,
+                       torch::Tensor embedding_values,
+                       torch::Tensor state_values,
+                       const std::shared_ptr<MemPartitionBufferStorage> &state_storage,
+                       int32_t device_idx);
+
     Indices getRandomIds(int64_t size, int32_t device_idx = 0) { return buffers_[device_idx]->getRandomIds(size); }
 
     bool hasSwap(int32_t device_idx = 0) { return buffers_[device_idx]->hasSwap(); }
