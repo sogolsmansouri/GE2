@@ -45,6 +45,32 @@ tool_exists() {
     fi
 }
 
+detect_nsys_reports() {
+    local help_reports
+    help_reports="$("${nsys_bin}" stats --help-reports 2>/dev/null || true)"
+
+    # Nsight Systems 2025+ naming.
+    if grep -q "cuda_gpu_kern_sum" <<<"${help_reports}" && grep -q "cuda_gpu_mem_time_sum" <<<"${help_reports}"; then
+        echo "cuda_api_sum,cuda_gpu_kern_sum,cuda_gpu_mem_time_sum"
+        return
+    fi
+
+    # Older Nsight Systems naming.
+    if grep -q "gpu_kern_sum" <<<"${help_reports}" && grep -q "gpu_mem_time" <<<"${help_reports}"; then
+        echo "cuda_api_sum,gpu_kern_sum,gpu_mem_time"
+        return
+    fi
+
+    # Broad fallback available on most installs.
+    if grep -q "cuda_api_gpu_sum" <<<"${help_reports}"; then
+        echo "cuda_api_gpu_sum"
+        return
+    fi
+
+    # Last-resort fallback.
+    echo "cuda_api_sum"
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --method)
@@ -212,7 +238,8 @@ elif [[ "${method}" == "nsys" ]]; then
 
     nsys_report="$(ls -1 "${nsys_prefix}.nsys-rep" "${nsys_prefix}.qdrep" 2>/dev/null | head -n1 || true)"
     if [[ -n "${nsys_report}" ]]; then
-        "${nsys_bin}" stats --report cuda_api_sum,gpu_kern_sum,gpu_mem_time "${nsys_report}" > "${nsys_stats}" || true
+        nsys_reports="$(detect_nsys_reports)"
+        "${nsys_bin}" stats --report "${nsys_reports}" "${nsys_report}" > "${nsys_stats}" || true
     fi
 
     echo "Generated:"
