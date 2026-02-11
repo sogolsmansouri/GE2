@@ -33,6 +33,33 @@ class CudaDeviceRestoreGuard {
     int device_ = -1;
     bool restore_ = false;
 };
+
+int fused_sparse_debug_level() {
+    static const int level = []() {
+        const char *env = std::getenv("GEGE_FUSED_SPARSE_DEBUG");
+        if (env == nullptr || env[0] == '\0') {
+            return 0;
+        }
+        int v = std::atoi(env);
+        return v > 0 ? v : 0;
+    }();
+    return level;
+}
+
+bool should_log_fused_sparse_debug() {
+    static std::atomic<int64_t> budget{0};
+    if (fused_sparse_debug_level() <= 0) {
+        return false;
+    }
+    // Limit volume in hot paths.
+    return budget.fetch_add(1) < 64;
+}
+
+void log_fused_sparse_debug(const std::string &msg) {
+    if (should_log_fused_sparse_debug()) {
+        SPDLOG_INFO("FusedSparse debug: {}", msg);
+    }
+}
 }  // namespace
 
 void renameFile(string old_filename, string new_filename) {
@@ -666,20 +693,71 @@ bool MemPartitionBufferStorage::indexAddFused(Indices indices,
     static std::atomic<int64_t> total_post_nnz{0};
 
     if (!state_storage) {
+        log_fused_sparse_debug("state_storage is null");
         return false;
     }
     if (device_ != torch::kCUDA || state_storage->device_ != torch::kCUDA) {
+        log_fused_sparse_debug("storage device is not CUDA");
         return false;
     }
     if (device_idx < 0 || device_idx >= static_cast<int32_t>(buffers_.size()) ||
         device_idx >= static_cast<int32_t>(state_storage->buffers_.size())) {
+        log_fused_sparse_debug("device_idx out of range for embedding/state buffers");
+        return false;
+    }
+
+    auto embedding_table = buffers_[device_idx]->buffer_tensor_gpu_view_;
+    auto state_table = state_storage->buffers_[device_idx]->buffer_tensor_gpu_view_;
+    if (!embedding_table.defined() || !state_table.defined()) {
+        log_fused_sparse_debug("embedding/state GPU table is undefined");
+        return false;
+    }
+    if (!indices.defined() || !embedding_values.defined() || !state_values.defined()) {
+        log_fused_sparse_debug("indices/embedding_values/state_values is undefined");
+        return false;
+    }
+    if (!embedding_table.is_cuda() || !state_table.is_cuda() || !embedding_values.is_cuda() || !state_values.is_cuda()) {
+        log_fused_sparse_debug("one of embedding/state table or update tensors is not CUDA");
+        return false;
+    }
+    if (embedding_table.device() != state_table.device() || embedding_table.device() != embedding_values.device() ||
+        embedding_table.device() != state_values.device()) {
+        log_fused_sparse_debug("device mismatch across embedding/state table and update tensors");
+        return false;
+    }
+    if (indices.dim() != 1 || embedding_table.dim() != 2 || state_table.dim() != 2 || embedding_values.dim() != 2 || state_values.dim() != 2) {
+        log_fused_sparse_debug("unexpected tensor rank; expected indices=1D and others=2D");
+        return false;
+    }
+    if (indices.scalar_type() != torch::kInt64) {
+        log_fused_sparse_debug("indices dtype is not int64");
+        return false;
+    }
+    if (embedding_table.scalar_type() != embedding_values.scalar_type() || embedding_table.scalar_type() != state_values.scalar_type() ||
+        embedding_table.scalar_type() != state_table.scalar_type()) {
+        log_fused_sparse_debug("dtype mismatch across embedding/state table and update tensors");
+        return false;
+    }
+    if (embedding_table.scalar_type() != torch::kFloat32 && embedding_table.scalar_type() != torch::kFloat64) {
+        log_fused_sparse_debug("dtype is neither float32 nor float64");
+        return false;
+    }
+    int64_t nnz = indices.size(0);
+    int64_t width = embedding_table.size(1);
+    if (state_table.size(1) != width || embedding_values.size(0) != nnz || state_values.size(0) != nnz ||
+        embedding_values.size(1) != width || state_values.size(1) != width) {
+        log_fused_sparse_debug("shape mismatch between table width/nnz and update tensors");
+        return false;
+    }
+    if (!embedding_table.is_contiguous() || !state_table.is_contiguous() || !embedding_values.is_contiguous() || !state_values.is_contiguous()) {
+        log_fused_sparse_debug("at least one tensor is non-contiguous");
         return false;
     }
 
     int64_t pre_nnz = 0;
     int64_t post_nnz = 0;
-    bool ok = gege_fused_sparse_add_cuda(buffers_[device_idx]->buffer_tensor_gpu_view_,
-                                         state_storage->buffers_[device_idx]->buffer_tensor_gpu_view_,
+    bool ok = gege_fused_sparse_add_cuda(embedding_table,
+                                         state_table,
                                          indices,
                                          embedding_values,
                                          state_values,
@@ -687,6 +765,7 @@ bool MemPartitionBufferStorage::indexAddFused(Indices indices,
                                          &pre_nnz,
                                          &post_nnz);
     if (!ok) {
+        log_fused_sparse_debug("gege_fused_sparse_add_cuda returned false after pre-checks");
         return false;
     }
 

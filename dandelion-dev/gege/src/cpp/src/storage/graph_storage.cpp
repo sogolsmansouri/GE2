@@ -2,6 +2,7 @@
 #include <c10/cuda/CUDACachingAllocator.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <random>
@@ -34,6 +35,28 @@ bool fused_sparse_update_enabled() {
         return !(env[0] == '\0' || (env[0] == '0' && env[1] == '\0'));
     }();
     return enabled;
+}
+
+int fused_sparse_debug_level() {
+    static const int level = []() {
+        const char *env = std::getenv("GEGE_FUSED_SPARSE_DEBUG");
+        if (env == nullptr || env[0] == '\0') {
+            return 0;
+        }
+        int v = std::atoi(env);
+        return v > 0 ? v : 0;
+    }();
+    return level;
+}
+
+void fused_sparse_debug_once(const char *msg) {
+    static std::atomic<int64_t> budget{0};
+    if (fused_sparse_debug_level() <= 0) {
+        return;
+    }
+    if (budget.fetch_add(1) < 16) {
+        SPDLOG_INFO("FusedSparse debug: {}", msg);
+    }
 }
 } // namespace
 
@@ -364,14 +387,17 @@ bool GraphModelStorage::updateAddNodeEmbeddingsAndStateFused(Indices indices,
                                                              int32_t device_idx) {
 #ifdef GEGE_CUDA
     if (!fused_sparse_update_enabled()) {
+        fused_sparse_debug_once("GEGE_ENABLE_FUSED_SPARSE_UPDATE is disabled");
         return false;
     }
     if (storage_ptrs_.node_embeddings == nullptr || storage_ptrs_.node_optimizer_state == nullptr) {
+        fused_sparse_debug_once("node_embeddings or node_optimizer_state is null");
         return false;
     }
     auto embeddings_storage = std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_embeddings);
     auto state_storage = std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_optimizer_state);
     if (!embeddings_storage || !state_storage) {
+        fused_sparse_debug_once("node_embeddings/node_optimizer_state is not MemPartitionBufferStorage");
         return false;
     }
     bool fused_ok = embeddings_storage->indexAddFused(indices, embedding_values, state_values, state_storage, device_idx);
