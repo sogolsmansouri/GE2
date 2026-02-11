@@ -10,6 +10,9 @@ project(ge2 VERSION 1.0 LANGUAGES CXX)
 
 include(FindPackageHandleStandardArgs)
 
+option(GEGE_ENABLE_PROFILING "Build GEGE with profiling-friendly symbols and frame pointers." OFF)
+set(GEGE_PROFILING_BACKEND "perf" CACHE STRING "Profiling backend for additional compile/link flags (perf|gprof).")
+set_property(CACHE GEGE_PROFILING_BACKEND PROPERTY STRINGS perf gprof)
 
 set(CMAKE_CXX_VISIBILITY_PRESET default)
 
@@ -21,6 +24,16 @@ if ("${CMAKE_CXX_COMPILER_ID}" MATCHES "GNU")
 else ()
     message(FATAL_ERROR "Unknown compiler")
 endif ()
+
+if (GEGE_ENABLE_PROFILING)
+    message(STATUS "GEGE profiling enabled (backend=${GEGE_PROFILING_BACKEND})")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -fno-omit-frame-pointer")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fno-omit-frame-pointer")
+
+    if (NOT GEGE_PROFILING_BACKEND STREQUAL "perf" AND NOT GEGE_PROFILING_BACKEND STREQUAL "gprof")
+        message(FATAL_ERROR "Invalid GEGE_PROFILING_BACKEND='${GEGE_PROFILING_BACKEND}'. Expected one of: perf, gprof.")
+    endif()
+endif()
 
 if(${USE_CUDA})
     add_definitions(-DGEGE_CUDA=${USE_CUDA})
@@ -179,6 +192,14 @@ target_link_libraries(gege_train ${PROJECT_NAME})
 target_link_libraries(gege_eval ${PROJECT_NAME})
 target_link_libraries(gege_train ${TORCH_LIBRARIES})
 target_link_libraries(gege_eval ${TORCH_LIBRARIES})
+
+if (GEGE_ENABLE_PROFILING AND GEGE_PROFILING_BACKEND STREQUAL "gprof")
+    target_compile_options(${PROJECT_NAME} PRIVATE -pg)
+    target_compile_options(gege_train PRIVATE -pg)
+    target_compile_options(gege_eval PRIVATE -pg)
+    target_link_options(gege_train PRIVATE -pg -no-pie)
+    target_link_options(gege_eval PRIVATE -pg -no-pie)
+endif()
 
 find_library(TORCH_PYTHON_LIBRARY torch_python PATHS "${TORCH_INSTALL_PREFIX}/lib")
 message(STATUS "TORCH_PYTHON_LIBRARY: ${TORCH_PYTHON_LIBRARY}")
