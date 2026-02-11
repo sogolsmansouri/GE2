@@ -188,6 +188,10 @@ bool gege_fused_sparse_add_cuda(torch::Tensor embedding_table,
         }
     });
 
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    // Keep launch error checking compatible across Torch/CUDA header versions.
+    const cudaError_t launch_err = cudaGetLastError();
+    if (launch_err != cudaSuccess) {
+        return false;
+    }
     return true;
 }
