@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <cstdint>
+#include <cuda_runtime.h>
 
 #include "common/datatypes.h"
 #include "data/batch.h"
@@ -172,6 +173,10 @@ class MemPartitionBufferStorage : public Storage {
     int swap_waiting_;
     int swap_generation_;
 
+    std::vector<cudaStream_t> p2p_streams_;
+    std::vector<cudaEvent_t> p2p_events_;
+    bool p2p_exec_ready_;
+
     std::mutex comm_stats_mutex_;
     std::vector<uint64_t> device_swap_rounds_;
     uint64_t coordinated_swap_round_;
@@ -181,6 +186,8 @@ class MemPartitionBufferStorage : public Storage {
     uint64_t epoch_d2h_bytes_;
 
     void enablePeerAccess_();
+    void initializeP2PExecution_();
+    void destroyP2PExecution_();
     void performNextSwapP2P_();
 
 };

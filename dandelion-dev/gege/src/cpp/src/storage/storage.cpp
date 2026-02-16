@@ -260,6 +260,7 @@ MemPartitionBufferStorage::MemPartitionBufferStorage(string filename, int64_t di
     devices_ = devices;
     swap_waiting_ = 0;
     swap_generation_ = 0;
+    p2p_exec_ready_ = false;
     device_swap_rounds_.assign(devices_.size(), 0);
     coordinated_swap_round_ = 0;
     epoch_p2p_bytes_ = 0;
@@ -272,6 +273,7 @@ MemPartitionBufferStorage::MemPartitionBufferStorage(string filename, int64_t di
         buffers_.emplace_back(buffer);
     }
     enablePeerAccess_();
+    initializeP2PExecution_();
 }
 
 void MemPartitionBufferStorage::enablePeerAccess_() {
@@ -309,6 +311,60 @@ void MemPartitionBufferStorage::enablePeerAccess_() {
         }
     }
     SPDLOG_INFO("MemPartitionBufferStorage: inter-GPU swap peer-access initialization complete");
+}
+
+void MemPartitionBufferStorage::initializeP2PExecution_() {
+    p2p_exec_ready_ = false;
+    p2p_streams_.clear();
+    p2p_events_.clear();
+
+    if (!inter_gpu_swap_ || devices_.size() <= 1) {
+        return;
+    }
+
+    CudaDeviceRestoreGuard device_guard;
+    p2p_streams_.resize(devices_.size(), nullptr);
+    p2p_events_.resize(devices_.size(), nullptr);
+
+    for (int i = 0; i < devices_.size(); i++) {
+        cudaSetDevice(devices_[i].index());
+        cudaError_t stream_err = cudaStreamCreateWithFlags(&p2p_streams_[i], cudaStreamNonBlocking);
+        if (stream_err != cudaSuccess) {
+            SPDLOG_WARN("Unable to create P2P stream for device {}: {}", devices_[i].index(), cudaGetErrorString(stream_err));
+            destroyP2PExecution_();
+            return;
+        }
+
+        cudaError_t event_err = cudaEventCreateWithFlags(&p2p_events_[i], cudaEventDisableTiming);
+        if (event_err != cudaSuccess) {
+            SPDLOG_WARN("Unable to create P2P event for device {}: {}", devices_[i].index(), cudaGetErrorString(event_err));
+            destroyP2PExecution_();
+            return;
+        }
+    }
+
+    p2p_exec_ready_ = true;
+}
+
+void MemPartitionBufferStorage::destroyP2PExecution_() {
+    CudaDeviceRestoreGuard device_guard;
+
+    for (int i = 0; i < devices_.size(); i++) {
+        cudaSetDevice(devices_[i].index());
+
+        if (i < static_cast<int>(p2p_events_.size()) && p2p_events_[i] != nullptr) {
+            cudaEventDestroy(p2p_events_[i]);
+            p2p_events_[i] = nullptr;
+        }
+        if (i < static_cast<int>(p2p_streams_.size()) && p2p_streams_[i] != nullptr) {
+            cudaStreamDestroy(p2p_streams_[i]);
+            p2p_streams_[i] = nullptr;
+        }
+    }
+
+    p2p_events_.clear();
+    p2p_streams_.clear();
+    p2p_exec_ready_ = false;
 }
 
 void MemPartitionBufferStorage::performNextSwapP2P_() {
@@ -352,6 +408,11 @@ void MemPartitionBufferStorage::performNextSwapP2P_() {
     uint64_t transfer_bytes = 0;
     for (int dst_idx = 0; dst_idx < num_devices; dst_idx++) {
         int dst_device = devices_[dst_idx].index();
+        cudaSetDevice(dst_device);
+        cudaStream_t dst_stream = 0;
+        if (p2p_exec_ready_ && dst_idx < static_cast<int>(p2p_streams_.size()) && p2p_streams_[dst_idx] != nullptr) {
+            dst_stream = p2p_streams_[dst_idx];
+        }
         char *dst_base = static_cast<char *>(next_gpu_views[dst_idx].data_ptr());
         int64_t dst_slot_bytes = buffers_[dst_idx]->getSlotBytes();
         for (int dst_slot = 0; dst_slot < next_states[dst_idx].size(0); dst_slot++) {
@@ -373,10 +434,9 @@ void MemPartitionBufferStorage::performNextSwapP2P_() {
 
             cudaError_t copy_err;
             if (src_idx == dst_idx) {
-                cudaSetDevice(dst_device);
-                copy_err = cudaMemcpyAsync(dst_ptr, src_ptr, copy_bytes, cudaMemcpyDeviceToDevice, 0);
+                copy_err = cudaMemcpyAsync(dst_ptr, src_ptr, copy_bytes, cudaMemcpyDeviceToDevice, dst_stream);
             } else {
-                copy_err = cudaMemcpyPeerAsync(dst_ptr, dst_device, src_ptr, src_device, copy_bytes, 0);
+                copy_err = cudaMemcpyPeerAsync(dst_ptr, dst_device, src_ptr, src_device, copy_bytes, dst_stream);
                 transfer_ops++;
                 transfer_bytes += static_cast<uint64_t>(copy_bytes);
             }
@@ -390,9 +450,23 @@ void MemPartitionBufferStorage::performNextSwapP2P_() {
 
     for (int dst_idx = 0; dst_idx < num_devices; dst_idx++) {
         cudaSetDevice(devices_[dst_idx].index());
-        cudaError_t sync_err = cudaStreamSynchronize(0);
+        cudaError_t sync_err = cudaSuccess;
+        if (p2p_exec_ready_ &&
+            dst_idx < static_cast<int>(p2p_streams_.size()) &&
+            p2p_streams_[dst_idx] != nullptr &&
+            dst_idx < static_cast<int>(p2p_events_.size()) &&
+            p2p_events_[dst_idx] != nullptr) {
+            cudaError_t record_err = cudaEventRecord(p2p_events_[dst_idx], p2p_streams_[dst_idx]);
+            if (record_err != cudaSuccess) {
+                SPDLOG_ERROR("P2P swap event record failed on device {}: {}", devices_[dst_idx].index(), cudaGetErrorString(record_err));
+                throw std::runtime_error("");
+            }
+            sync_err = cudaEventSynchronize(p2p_events_[dst_idx]);
+        } else {
+            sync_err = cudaStreamSynchronize(0);
+        }
         if (sync_err != cudaSuccess) {
-            SPDLOG_ERROR("P2P swap stream sync failed on device {}: {}", devices_[dst_idx].index(), cudaGetErrorString(sync_err));
+            SPDLOG_ERROR("P2P swap stream/event sync failed on device {}: {}", devices_[dst_idx].index(), cudaGetErrorString(sync_err));
             throw std::runtime_error("");
         }
     }
@@ -539,6 +613,7 @@ void MemPartitionBufferStorage::append(torch::Tensor values) {
 }
 
 MemPartitionBufferStorage::~MemPartitionBufferStorage() { 
+    destroyP2PExecution_();
     for(int i = 0; i < devices_.size(); i ++) {
         delete buffers_[i];
     }
