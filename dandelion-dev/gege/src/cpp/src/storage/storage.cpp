@@ -341,6 +341,8 @@ void MemPartitionBufferStorage::initializeP2PExecution_() {
             destroyP2PExecution_();
             return;
         }
+        SPDLOG_INFO("P2P debug init: storage={} device={} stream_ptr={} event_ptr={}",
+                    filename_, devices_[i].index(), static_cast<void *>(p2p_streams_[i]), static_cast<void *>(p2p_events_[i]));
     }
 
     p2p_exec_ready_ = true;
@@ -406,12 +408,23 @@ void MemPartitionBufferStorage::performNextSwapP2P_() {
 
     int transfer_ops = 0;
     uint64_t transfer_bytes = 0;
+    uint64_t next_round_id = 0;
+    {
+        std::lock_guard<std::mutex> lock(comm_stats_mutex_);
+        next_round_id = coordinated_swap_round_ + 1;
+    }
+    const bool log_first_round_debug = (next_round_id == 1);
+
     for (int dst_idx = 0; dst_idx < num_devices; dst_idx++) {
         int dst_device = devices_[dst_idx].index();
         cudaSetDevice(dst_device);
         cudaStream_t dst_stream = 0;
         if (p2p_exec_ready_ && dst_idx < static_cast<int>(p2p_streams_.size()) && p2p_streams_[dst_idx] != nullptr) {
             dst_stream = p2p_streams_[dst_idx];
+        }
+        if (log_first_round_debug) {
+            SPDLOG_INFO("P2P debug round {}: storage={} dst_device={} stream_ptr={} stream_source={}",
+                        next_round_id, filename_, dst_device, static_cast<void *>(dst_stream), (dst_stream == 0 ? "default" : "custom"));
         }
         char *dst_base = static_cast<char *>(next_gpu_views[dst_idx].data_ptr());
         int64_t dst_slot_bytes = buffers_[dst_idx]->getSlotBytes();
@@ -440,6 +453,12 @@ void MemPartitionBufferStorage::performNextSwapP2P_() {
                 transfer_ops++;
                 transfer_bytes += static_cast<uint64_t>(copy_bytes);
             }
+            if (log_first_round_debug) {
+                SPDLOG_INFO(
+                    "P2P debug round {}: storage={} copy_type={} partition=p{} src_device={} src_slot={} dst_device={} dst_slot={} bytes={} stream_ptr={}",
+                    next_round_id, filename_, (src_idx == dst_idx ? "D2D-local" : "P2P"), part_id, src_device, src_slot, dst_device, dst_slot,
+                    copy_bytes, static_cast<void *>(dst_stream));
+            }
             if (copy_err != cudaSuccess) {
                 SPDLOG_ERROR("P2P copy failed for p{} {}:{} -> {}:{} with error {}", part_id, src_idx, src_slot, dst_idx, dst_slot,
                              cudaGetErrorString(copy_err));
@@ -456,6 +475,10 @@ void MemPartitionBufferStorage::performNextSwapP2P_() {
             p2p_streams_[dst_idx] != nullptr &&
             dst_idx < static_cast<int>(p2p_events_.size()) &&
             p2p_events_[dst_idx] != nullptr) {
+            if (log_first_round_debug) {
+                SPDLOG_INFO("P2P debug round {}: storage={} dst_device={} sync_mode=event stream_ptr={} event_ptr={}", next_round_id, filename_,
+                            devices_[dst_idx].index(), static_cast<void *>(p2p_streams_[dst_idx]), static_cast<void *>(p2p_events_[dst_idx]));
+            }
             cudaError_t record_err = cudaEventRecord(p2p_events_[dst_idx], p2p_streams_[dst_idx]);
             if (record_err != cudaSuccess) {
                 SPDLOG_ERROR("P2P swap event record failed on device {}: {}", devices_[dst_idx].index(), cudaGetErrorString(record_err));
@@ -463,6 +486,9 @@ void MemPartitionBufferStorage::performNextSwapP2P_() {
             }
             sync_err = cudaEventSynchronize(p2p_events_[dst_idx]);
         } else {
+            if (log_first_round_debug) {
+                SPDLOG_INFO("P2P debug round {}: storage={} dst_device={} sync_mode=default_stream", next_round_id, filename_, devices_[dst_idx].index());
+            }
             sync_err = cudaStreamSynchronize(0);
         }
         if (sync_err != cudaSuccess) {
