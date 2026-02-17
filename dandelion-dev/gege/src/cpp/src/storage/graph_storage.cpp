@@ -10,11 +10,38 @@
 #include <c10/cuda/CUDAStream.h>
 #include <ATen/cuda/CUDAEvent.h>
 
+#if defined(GEGE_CUDA) && __has_include(<nvtx3/nvToolsExt.h>)
+#include <nvtx3/nvToolsExt.h>
+#define GEGE_HAS_NVTX 1
+#elif defined(GEGE_CUDA) && __has_include(<nvToolsExt.h>)
+#include <nvToolsExt.h>
+#define GEGE_HAS_NVTX 1
+#else
+#define GEGE_HAS_NVTX 0
+#endif
+
 #include "configuration/util.h"
 #include "data/ordering.h"
 #include "reporting/logger.h"
 
 namespace {
+class NvtxRangeGuard {
+   public:
+    explicit NvtxRangeGuard(const char *name) {
+#if GEGE_HAS_NVTX
+        nvtxRangePushA(name);
+#else
+        (void)name;
+#endif
+    }
+
+    ~NvtxRangeGuard() {
+#if GEGE_HAS_NVTX
+        nvtxRangePop();
+#endif
+    }
+};
+
 bool profile_timing_enabled() {
     static const bool enabled = []() {
         const char *env = std::getenv("GEGE_PROFILE_TIMING");
@@ -25,6 +52,19 @@ bool profile_timing_enabled() {
     }();
     return enabled;
 }
+
+bool debug_subgraph_enabled() {
+    static const bool enabled = []() {
+        const char *env = std::getenv("GEGE_DEBUG_SUBGRAPH");
+        if (env == nullptr) {
+            return false;
+        }
+        return !(env[0] == '\0' || (env[0] == '0' && env[1] == '\0'));
+    }();
+    return enabled;
+}
+
+std::atomic<int64_t> subgraph_call_id_seq{0};
 
 bool fused_sparse_update_enabled() {
     static const bool enabled = []() {
@@ -822,12 +862,20 @@ std::pair<std::vector<int>, std::vector<int>> current_swap_ids = getNextSwapIds(
 
 void GraphModelStorage::getNextSubGraph() {
     std::pair<std::vector<int>, std::vector<int>> next_swap_ids = getNextSwapIds();
+    if (debug_subgraph_enabled()) {
+        SPDLOG_INFO("SUBGRAPH prefetch trigger: device={} evict_partitions={} admit_partitions={}",
+                    0,
+                    std::get<0>(next_swap_ids).size(),
+                    std::get<1>(next_swap_ids).size());
+    }
     next_subgraph_state_ = std::make_shared<InMemorySubgraphState>();
     next_subgraph_state_->in_memory_subgraph_ = nullptr;
     std::thread(&GraphModelStorage::updateInMemorySubGraph_, this, next_subgraph_state_, next_swap_ids, 0).detach();
 }
 
 void GraphModelStorage::updateInMemorySubGraph_(shared_ptr<InMemorySubgraphState> subgraph, std::pair<std::vector<int>, std::vector<int>> swap_ids, int32_t device_idx) {
+    int64_t subgraph_call_id = subgraph_call_id_seq.fetch_add(1) + 1;
+    bool debug_subgraph = debug_subgraph_enabled();
     auto total_start = std::chrono::steady_clock::now();
     if (prefetch_) {
         subgraph_lock_->lock();
@@ -844,10 +892,24 @@ void GraphModelStorage::updateInMemorySubGraph_(shared_ptr<InMemorySubgraphState
     int num_partitions = getNumPartitions();
     int num_swap_partitions = evict_partition_ids.size();
     int num_remaining_partitions = buffer_size - num_swap_partitions;
+    if (debug_subgraph) {
+        SPDLOG_INFO("SUBGRAPH call={} device={} start evict_partitions={} admit_partitions={} buffer_size={} edge_buckets_in_mem={} num_partitions={}",
+                    subgraph_call_id,
+                    device_idx,
+                    evict_partition_ids.size(),
+                    admit_partition_ids.size(),
+                    buffer_size,
+                    num_edge_buckets_in_mem,
+                    num_partitions);
+    }
 
     auto bucket_partition_start = std::chrono::steady_clock::now();
     // get edge buckets that will be kept in memory
-    torch::Tensor keep_mask = torch::ones({num_edge_buckets_in_mem}, torch::kBool);
+    torch::Tensor keep_mask;
+    {
+        NvtxRangeGuard nvtx_bucket_filter("subgraph.bucket_filter_masked_select");
+        keep_mask = torch::ones({num_edge_buckets_in_mem}, torch::kBool);
+    }
     auto accessor_keep_mask = keep_mask.accessor<bool, 1>();
     auto accessor_in_memory_edge_bucket_ids_ = current_subgraph_states_[device_idx]->in_memory_edge_bucket_ids_.accessor<int64_t, 1>();
 
@@ -864,9 +926,15 @@ void GraphModelStorage::updateInMemorySubGraph_(shared_ptr<InMemorySubgraphState
         }
     }
 
-    torch::Tensor in_mem_edge_bucket_ids = current_subgraph_states_[device_idx]->in_memory_edge_bucket_ids_.masked_select(keep_mask);
-    torch::Tensor in_mem_edge_bucket_sizes = current_subgraph_states_[device_idx]->in_memory_edge_bucket_sizes_.masked_select(keep_mask);
-    torch::Tensor local_or_global_edge_bucket_starts = current_subgraph_states_[device_idx]->in_memory_edge_bucket_starts_.masked_select(keep_mask);
+    torch::Tensor in_mem_edge_bucket_ids;
+    torch::Tensor in_mem_edge_bucket_sizes;
+    torch::Tensor local_or_global_edge_bucket_starts;
+    {
+        NvtxRangeGuard nvtx_bucket_filter("subgraph.bucket_filter_masked_select");
+        in_mem_edge_bucket_ids = current_subgraph_states_[device_idx]->in_memory_edge_bucket_ids_.masked_select(keep_mask);
+        in_mem_edge_bucket_sizes = current_subgraph_states_[device_idx]->in_memory_edge_bucket_sizes_.masked_select(keep_mask);
+        local_or_global_edge_bucket_starts = current_subgraph_states_[device_idx]->in_memory_edge_bucket_starts_.masked_select(keep_mask);
+    }
 
     // get new in memory partition ids
     keep_mask = torch::ones({buffer_size}, torch::kBool);
@@ -885,11 +953,26 @@ void GraphModelStorage::updateInMemorySubGraph_(shared_ptr<InMemorySubgraphState
         }
     }
 
-    torch::Tensor old_in_mem_partition_ids = current_subgraph_states_[device_idx]->in_memory_partition_ids_.masked_select(keep_mask);
-    torch::Tensor new_in_mem_partition_ids = current_subgraph_states_[device_idx]->in_memory_partition_ids_.masked_scatter(~keep_mask, admit_ids_tensor);
+    torch::Tensor old_in_mem_partition_ids;
+    torch::Tensor new_in_mem_partition_ids;
+    {
+        NvtxRangeGuard nvtx_bucket_filter("subgraph.bucket_filter_masked_select");
+        old_in_mem_partition_ids = current_subgraph_states_[device_idx]->in_memory_partition_ids_.masked_select(keep_mask);
+        new_in_mem_partition_ids = current_subgraph_states_[device_idx]->in_memory_partition_ids_.masked_scatter(~keep_mask, admit_ids_tensor);
+    }
     auto old_in_mem_partition_ids_accessor = old_in_mem_partition_ids.accessor<int64_t, 1>();
     auto new_in_mem_partition_ids_accessor = new_in_mem_partition_ids.accessor<int64_t, 1>();
     auto bucket_partition_end = std::chrono::steady_clock::now();
+    if (debug_subgraph) {
+        auto bucket_partition_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(bucket_partition_end - bucket_partition_start).count();
+        SPDLOG_INFO("SUBGRAPH call={} stage=partition_filter kept_edge_buckets={} kept_partitions={} swapped_partitions={} ms={}",
+                    subgraph_call_id,
+                    in_mem_edge_bucket_ids.size(0),
+                    old_in_mem_partition_ids.size(0),
+                    num_swap_partitions,
+                    bucket_partition_ms);
+    }
 
     // get new incoming edge buckets
     auto bucket_meta_start = std::chrono::steady_clock::now();
@@ -962,15 +1045,48 @@ void GraphModelStorage::updateInMemorySubGraph_(shared_ptr<InMemorySubgraphState
             src_ids_order_accessor[idx] = edge_bucket_id;
         }
     }
+    auto bucket_meta_pre_sort_end = std::chrono::steady_clock::now();
+    auto sort_stage_start = bucket_meta_pre_sort_end;
+    auto sort_argsort_start = sort_stage_start;
 
     // TODO: all these argsorts can be done with one omp for loop, probably faster, same with masked_selects above
-    torch::Tensor arg_sort = torch::argsort(in_mem_edge_bucket_ids);
-    arg_sort = (arg_sort.index_select(0, torch::argsort(torch::argsort(src_ids_order))));
-    in_mem_edge_bucket_ids = (in_mem_edge_bucket_ids.index_select(0, arg_sort));
-    in_mem_edge_bucket_sizes = (in_mem_edge_bucket_sizes.index_select(0, arg_sort));
-    local_or_global_edge_bucket_starts = (local_or_global_edge_bucket_starts.index_select(0, arg_sort));
-    in_mem_mask = (in_mem_mask.index_select(0, arg_sort));
+    torch::Tensor arg_sort;
+    {
+        NvtxRangeGuard nvtx_bucket_reorder("subgraph.bucket_reorder_argsort");
+        arg_sort = torch::argsort(in_mem_edge_bucket_ids);
+        arg_sort = (arg_sort.index_select(0, torch::argsort(torch::argsort(src_ids_order))));
+    }
+    auto sort_argsort_end = std::chrono::steady_clock::now();
+    auto sort_reorder_start = sort_argsort_end;
+    {
+        NvtxRangeGuard nvtx_bucket_reorder("subgraph.bucket_reorder_argsort");
+        in_mem_edge_bucket_ids = (in_mem_edge_bucket_ids.index_select(0, arg_sort));
+        in_mem_edge_bucket_sizes = (in_mem_edge_bucket_sizes.index_select(0, arg_sort));
+        local_or_global_edge_bucket_starts = (local_or_global_edge_bucket_starts.index_select(0, arg_sort));
+        in_mem_mask = (in_mem_mask.index_select(0, arg_sort));
+    }
+    auto sort_stage_end = std::chrono::steady_clock::now();
     auto bucket_meta_end = std::chrono::steady_clock::now();
+    if (debug_subgraph) {
+        auto bucket_meta_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(bucket_meta_pre_sort_end - bucket_meta_start).count();
+        auto sort_argsort_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(sort_argsort_end - sort_argsort_start).count();
+        auto sort_reorder_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(sort_stage_end - sort_reorder_start).count();
+        auto sort_total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(sort_stage_end - sort_stage_start).count();
+        SPDLOG_INFO("SUBGRAPH call={} stage=bucket_meta new_edge_buckets={} total_edge_buckets={} ms={}",
+                    subgraph_call_id,
+                    num_new_edge_buckets,
+                    in_mem_edge_bucket_ids.size(0),
+                    bucket_meta_ms);
+        SPDLOG_INFO("SUBGRAPH call={} stage=sort_reorder meta_ids={} argsort_ms={} reorder_ms={} total_ms={}",
+                    subgraph_call_id,
+                    in_mem_edge_bucket_ids.size(0),
+                    sort_argsort_ms,
+                    sort_reorder_ms,
+                    sort_total_ms);
+    }
 
     // with everything in order grab the edge buckets
     auto edge_materialize_start = std::chrono::steady_clock::now();
@@ -986,23 +1102,35 @@ void GraphModelStorage::updateInMemorySubGraph_(shared_ptr<InMemorySubgraphState
     torch::Tensor new_all_in_memory_edges = torch::empty({total_size, storage_ptrs_.edges->dim1_size_}, torch::kInt64);
 
 // get the edges
+    {
+        NvtxRangeGuard nvtx_edge_materialize("subgraph.edge_materialize_loop");
 #pragma omp parallel for
-    for (int i = 0; i < num_edge_buckets_in_mem; i++) {
-        int64_t edge_bucket_size = in_mem_edge_bucket_sizes_accessor[i];
-        int64_t edge_bucket_start = local_or_global_edge_bucket_starts_accessor[i];
-        bool in_mem = in_mem_mask_accessor[i];
-        int64_t local_offset = in_mem_edge_bucket_starts_accessor[i];
+        for (int i = 0; i < num_edge_buckets_in_mem; i++) {
+            int64_t edge_bucket_size = in_mem_edge_bucket_sizes_accessor[i];
+            int64_t edge_bucket_start = local_or_global_edge_bucket_starts_accessor[i];
+            bool in_mem = in_mem_mask_accessor[i];
+            int64_t local_offset = in_mem_edge_bucket_starts_accessor[i];
 
-        if (in_mem) {
-            new_all_in_memory_edges.narrow(0, local_offset, edge_bucket_size) =
-                current_subgraph_states_[device_idx]->all_in_memory_edges_.narrow(0, edge_bucket_start, edge_bucket_size);
-        } else {
-            new_all_in_memory_edges.narrow(0, local_offset, edge_bucket_size) = storage_ptrs_.edges->range(edge_bucket_start, edge_bucket_size);
+            if (in_mem) {
+                new_all_in_memory_edges.narrow(0, local_offset, edge_bucket_size) =
+                    current_subgraph_states_[device_idx]->all_in_memory_edges_.narrow(0, edge_bucket_start, edge_bucket_size);
+            } else {
+                new_all_in_memory_edges.narrow(0, local_offset, edge_bucket_size) = storage_ptrs_.edges->range(edge_bucket_start, edge_bucket_size);
+            }
         }
     }
 
     subgraph->all_in_memory_edges_ = new_all_in_memory_edges;
     auto edge_materialize_end = std::chrono::steady_clock::now();
+    if (debug_subgraph) {
+        auto edge_materialize_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(edge_materialize_end - edge_materialize_start).count();
+        SPDLOG_INFO("SUBGRAPH call={} stage=edge_materialize total_edges={} edge_width={} ms={}",
+                    subgraph_call_id,
+                    total_size,
+                    storage_ptrs_.edges->dim1_size_,
+                    edge_materialize_ms);
+    }
 
     auto map_graph_start = std::chrono::steady_clock::now();
     if (storage_ptrs_.node_embeddings != nullptr) {
@@ -1020,21 +1148,24 @@ void GraphModelStorage::updateInMemorySubGraph_(shared_ptr<InMemorySubgraphState
 
     torch::Tensor mapped_edges;
     torch::Tensor mapped_edges_dst_sort;
-    if (storage_ptrs_.edges->dim1_size_ == 3) {
-        mapped_edges = torch::stack({subgraph->global_to_local_index_map_.index_select(0, subgraph->all_in_memory_edges_.select(1, 0)),
-                                     subgraph->all_in_memory_edges_.select(1, 1),
-                                     subgraph->global_to_local_index_map_.index_select(0, subgraph->all_in_memory_edges_.select(1, -1))})
-                           .transpose(0, 1);
-        // mapped_edges = mapped_edges.to(devices_[device_idx]);
-    } else if (storage_ptrs_.edges->dim1_size_ == 2) {
-        mapped_edges = torch::stack({subgraph->global_to_local_index_map_.index_select(0, subgraph->all_in_memory_edges_.select(1, 0)),
-                                     subgraph->global_to_local_index_map_.index_select(0, subgraph->all_in_memory_edges_.select(1, -1))})
-                           .transpose(0, 1);
-        // mapped_edges = mapped_edges.to(devices_[device_idx]);
-    } else {
-        // TODO use a function for logging errors and throwing expections
-        SPDLOG_ERROR("Unexpected number of edge columns");
-        std::runtime_error("Unexpected number of edge columns");
+    {
+        NvtxRangeGuard nvtx_map("subgraph.global_to_local_index_select");
+        if (storage_ptrs_.edges->dim1_size_ == 3) {
+            mapped_edges = torch::stack({subgraph->global_to_local_index_map_.index_select(0, subgraph->all_in_memory_edges_.select(1, 0)),
+                                         subgraph->all_in_memory_edges_.select(1, 1),
+                                         subgraph->global_to_local_index_map_.index_select(0, subgraph->all_in_memory_edges_.select(1, -1))})
+                               .transpose(0, 1);
+            // mapped_edges = mapped_edges.to(devices_[device_idx]);
+        } else if (storage_ptrs_.edges->dim1_size_ == 2) {
+            mapped_edges = torch::stack({subgraph->global_to_local_index_map_.index_select(0, subgraph->all_in_memory_edges_.select(1, 0)),
+                                         subgraph->global_to_local_index_map_.index_select(0, subgraph->all_in_memory_edges_.select(1, -1))})
+                               .transpose(0, 1);
+            // mapped_edges = mapped_edges.to(devices_[device_idx]);
+        } else {
+            // TODO use a function for logging errors and throwing expections
+            SPDLOG_ERROR("Unexpected number of edge columns");
+            std::runtime_error("Unexpected number of edge columns");
+        }
     }
 
     mapped_edges = mapped_edges.to(devices_[device_idx]);
@@ -1059,6 +1190,16 @@ void GraphModelStorage::updateInMemorySubGraph_(shared_ptr<InMemorySubgraphState
     }
 
     subgraph->in_memory_subgraph_ = std::make_shared<GegeGraph>(mapped_edges, mapped_edges_dst_sort, getNumNodesInMemory(device_idx));
+    auto map_graph_end = std::chrono::steady_clock::now();
+    if (debug_subgraph) {
+        auto map_graph_ms = std::chrono::duration_cast<std::chrono::milliseconds>(map_graph_end - map_graph_start).count();
+        SPDLOG_INFO("SUBGRAPH call={} stage=map_graph mapped_edges_rows={} mapped_edges_cols={} dst_sort_rows={} ms={}",
+                    subgraph_call_id,
+                    mapped_edges.size(0),
+                    mapped_edges.size(1),
+                    mapped_edges_dst_sort.size(0),
+                    map_graph_ms);
+    }
 
     // update state
     subgraph->in_memory_partition_ids_ = new_in_mem_partition_ids;
@@ -1072,9 +1213,20 @@ void GraphModelStorage::updateInMemorySubGraph_(shared_ptr<InMemorySubgraphState
         subgraph_cv_->notify_all();
     }
 
+    if (debug_subgraph) {
+        auto total_end = std::chrono::steady_clock::now();
+        auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(total_end - total_start).count();
+        SPDLOG_INFO("SUBGRAPH call={} device={} done total_ms={} final_edge_buckets={} final_edges_rows={} final_edges_cols={}",
+                    subgraph_call_id,
+                    device_idx,
+                    total_ms,
+                    in_mem_edge_bucket_ids.size(0),
+                    subgraph->all_in_memory_edges_.size(0),
+                    subgraph->all_in_memory_edges_.size(1));
+    }
+
     if (profile_timing_enabled()) {
         auto total_end = std::chrono::steady_clock::now();
-        auto map_graph_end = total_end;
         auto bucket_partition_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(bucket_partition_end - bucket_partition_start).count();
         auto bucket_meta_ms = std::chrono::duration_cast<std::chrono::milliseconds>(bucket_meta_end - bucket_meta_start).count();
@@ -1083,7 +1235,8 @@ void GraphModelStorage::updateInMemorySubGraph_(shared_ptr<InMemorySubgraphState
         auto map_graph_ms = std::chrono::duration_cast<std::chrono::milliseconds>(map_graph_end - map_graph_start).count();
         auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(total_end - total_start).count();
         SPDLOG_INFO(
-            "Timing updateInMemorySubGraph_: device={} buckets_partition={}ms buckets_meta={}ms edge_materialize={}ms map_and_graph={}ms total={}ms",
+            "Timing updateInMemorySubGraph_: call={} device={} buckets_partition={}ms buckets_meta={}ms edge_materialize={}ms map_and_graph={}ms total={}ms",
+            subgraph_call_id,
             device_idx,
             bucket_partition_ms,
             bucket_meta_ms,
@@ -1094,6 +1247,7 @@ void GraphModelStorage::updateInMemorySubGraph_(shared_ptr<InMemorySubgraphState
 }
 
 EdgeList GraphModelStorage::merge_sorted_edge_buckets(EdgeList edges, torch::Tensor starts, int buffer_size, bool src) {
+    NvtxRangeGuard nvtx_merge(src ? "subgraph.merge_sorted_edge_buckets.src" : "subgraph.merge_sorted_edge_buckets.dst");
     int sort_dim = 0;
     if (!src) {
         sort_dim = -1;

@@ -19,6 +19,17 @@ bool profile_timing_enabled() {
     }();
     return enabled;
 }
+
+bool debug_subgraph_enabled() {
+    static const bool enabled = []() {
+        const char *env = std::getenv("GEGE_DEBUG_SUBGRAPH");
+        if (env == nullptr) {
+            return false;
+        }
+        return !(env[0] == '\0' || (env[0] == '0' && env[1] == '\0'));
+    }();
+    return enabled;
+}
 } // namespace
 
 DataLoader::DataLoader(shared_ptr<GraphModelStorage> graph_storage, LearningTask learning_task, shared_ptr<TrainingConfig> training_config,
@@ -545,10 +556,22 @@ shared_ptr<Batch> DataLoader::getNextBatch(int32_t device_idx) {
             if (graph_storage_->hasSwap(device_idx)) {
                 auto transition_start = std::chrono::steady_clock::now();
                 auto wait_batches_start = transition_start;
+                bool debug_subgraph = debug_subgraph_enabled();
                 // Training uses one consumer per configured device; synchronous evaluation consumes only device 0.
                 int swap_participants = train_ ? static_cast<int>(all_batches_.size()) : 1;
                 if (swap_participants <= 0) {
                     swap_participants = 1;
+                }
+                int next_round_id = 0;
+                if (device_idx < device_swap_rounds_.size()) {
+                    next_round_id = device_swap_rounds_[device_idx] + 1;
+                }
+                if (debug_subgraph) {
+                    SPDLOG_INFO("ROUND device={} round={} wait=barrier start reason=await_all_batch_readers async_barrier={} participants={}",
+                                device_idx,
+                                next_round_id,
+                                async_barrier.load(),
+                                swap_participants);
                 }
 
                 // wait for all batches to finish before swapping
@@ -562,6 +585,18 @@ shared_ptr<Batch> DataLoader::getNextBatch(int32_t device_idx) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
                 auto wait_batches_end = std::chrono::steady_clock::now();
+                if (debug_subgraph) {
+                    auto wait_batches_ms = std::chrono::duration_cast<std::chrono::milliseconds>(wait_batches_end - wait_batches_start).count();
+                    SPDLOG_INFO("ROUND device={} round={} wait=barrier done ms={} async_barrier={}",
+                                device_idx,
+                                next_round_id,
+                                wait_batches_ms,
+                                async_barrier.load());
+                    SPDLOG_INFO("ROUND device={} round={} wait=active_devices start reason=await_all_devices_compute active_devices={}",
+                                device_idx,
+                                next_round_id,
+                                activate_devices_.load());
+                }
 
                 // ensure all devices finished the current round before swapping
                 auto wait_active_start = wait_batches_end;
@@ -569,10 +604,12 @@ shared_ptr<Batch> DataLoader::getNextBatch(int32_t device_idx) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
                 auto wait_active_end = std::chrono::steady_clock::now();
-
-                int next_round_id = 0;
-                if (device_idx < device_swap_rounds_.size()) {
-                    next_round_id = device_swap_rounds_[device_idx] + 1;
+                if (debug_subgraph) {
+                    auto wait_active_ms = std::chrono::duration_cast<std::chrono::milliseconds>(wait_active_end - wait_active_start).count();
+                    SPDLOG_INFO("ROUND device={} round={} wait=active_devices done ms={}",
+                                device_idx,
+                                next_round_id,
+                                wait_active_ms);
                 }
                 // Log one round coordinator view for sanity checking swap planning.
                 if (device_idx == 0 && devices_.size() > 1) {
@@ -583,11 +620,18 @@ shared_ptr<Batch> DataLoader::getNextBatch(int32_t device_idx) {
         c10::cuda::CUDACachingAllocator::emptyCache();
     }
                 auto update_start = std::chrono::steady_clock::now();
+                if (debug_subgraph) {
+                    SPDLOG_INFO("ROUND device={} round={} stage=update_subgraph start", device_idx, next_round_id);
+                }
                 // SPDLOG_INFO("Swapping subgraph for device {}", device_idx);
                 // auto t1 = std::chrono::high_resolution_clock::now();
                 graph_storage_->updateInMemorySubGraph(device_idx);
                 // SPDLOG_INFO("graph_storage_->updateInMemorySubGraph");
                 auto update_end = std::chrono::steady_clock::now();
+                if (debug_subgraph) {
+                    auto update_ms = std::chrono::duration_cast<std::chrono::milliseconds>(update_end - update_start).count();
+                    SPDLOG_INFO("ROUND device={} round={} stage=update_subgraph done ms={}", device_idx, next_round_id, update_ms);
+                }
 
                 if (devices_.size() <= 1) {
         c10::cuda::CUDACachingAllocator::emptyCache();

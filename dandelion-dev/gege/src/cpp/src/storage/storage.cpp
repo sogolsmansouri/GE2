@@ -10,6 +10,16 @@
 #include <cstdlib>
 #include <atomic>
 
+#if defined(GEGE_CUDA) && __has_include(<nvtx3/nvToolsExt.h>)
+#include <nvtx3/nvToolsExt.h>
+#define GEGE_HAS_NVTX 1
+#elif defined(GEGE_CUDA) && __has_include(<nvToolsExt.h>)
+#include <nvToolsExt.h>
+#define GEGE_HAS_NVTX 1
+#else
+#define GEGE_HAS_NVTX 0
+#endif
+
 #include "common/util.h"
 #include "configuration/constants.h"
 #include "fused_sparse_update.h"
@@ -19,6 +29,23 @@ using std::ios;
 using std::ios_base;
 
 namespace {
+class NvtxRangeGuard {
+   public:
+    explicit NvtxRangeGuard(const char *name) {
+#if GEGE_HAS_NVTX
+        nvtxRangePushA(name);
+#else
+        (void)name;
+#endif
+    }
+
+    ~NvtxRangeGuard() {
+#if GEGE_HAS_NVTX
+        nvtxRangePop();
+#endif
+    }
+};
+
 class CudaDeviceRestoreGuard {
    public:
     CudaDeviceRestoreGuard() : restore_(cudaGetDevice(&device_) == cudaSuccess) {}
@@ -59,6 +86,17 @@ void log_fused_sparse_debug(const std::string &msg) {
     if (should_log_fused_sparse_debug()) {
         SPDLOG_INFO("FusedSparse debug: {}", msg);
     }
+}
+
+bool debug_subgraph_enabled() {
+    static const bool enabled = []() {
+        const char *env = std::getenv("GEGE_DEBUG_SUBGRAPH");
+        if (env == nullptr) {
+            return false;
+        }
+        return !(env[0] == '\0' || (env[0] == '0' && env[1] == '\0'));
+    }();
+    return enabled;
 }
 }  // namespace
 
@@ -407,6 +445,8 @@ void MemPartitionBufferStorage::performNextSwapP2P_() {
     }
 
     int transfer_ops = 0;
+    int d2d_copy_ops = 0;
+    uint64_t total_copy_bytes = 0;
     uint64_t transfer_bytes = 0;
     uint64_t next_round_id = 0;
     {
@@ -415,86 +455,113 @@ void MemPartitionBufferStorage::performNextSwapP2P_() {
     }
     const bool log_first_round_debug = (next_round_id == 1);
 
-    for (int dst_idx = 0; dst_idx < num_devices; dst_idx++) {
-        int dst_device = devices_[dst_idx].index();
-        cudaSetDevice(dst_device);
-        cudaStream_t dst_stream = 0;
-        if (p2p_exec_ready_ && dst_idx < static_cast<int>(p2p_streams_.size()) && p2p_streams_[dst_idx] != nullptr) {
-            dst_stream = p2p_streams_[dst_idx];
-        }
-        if (log_first_round_debug) {
-            SPDLOG_INFO("P2P debug round {}: storage={} dst_device={} stream_ptr={} stream_source={}",
-                        next_round_id, filename_, dst_device, static_cast<void *>(dst_stream), (dst_stream == 0 ? "default" : "custom"));
-        }
-        char *dst_base = static_cast<char *>(next_gpu_views[dst_idx].data_ptr());
-        int64_t dst_slot_bytes = buffers_[dst_idx]->getSlotBytes();
-        for (int dst_slot = 0; dst_slot < next_states[dst_idx].size(0); dst_slot++) {
-            int part_id = next_states[dst_idx][dst_slot].item<int>();
-            if (part_id >= owner_gpu.size() || owner_gpu[part_id] < 0) {
-                SPDLOG_ERROR("P2P swap owner lookup failed for partition {}", part_id);
-                throw std::runtime_error("");
-            }
-
-            int src_idx = owner_gpu[part_id];
-            int src_slot = owner_slot[part_id];
-            int src_device = devices_[src_idx].index();
-            char *src_base = static_cast<char *>(buffers_[src_idx]->buffer_tensor_gpu_view_.data_ptr());
-            int64_t src_slot_bytes = buffers_[src_idx]->getSlotBytes();
-            int64_t copy_bytes = buffers_[src_idx]->getPartitionBytes(part_id);
-
-            char *dst_ptr = dst_base + dst_slot * dst_slot_bytes;
-            char *src_ptr = src_base + src_slot * src_slot_bytes;
-
-            cudaError_t copy_err;
-            if (src_idx == dst_idx) {
-                copy_err = cudaMemcpyAsync(dst_ptr, src_ptr, copy_bytes, cudaMemcpyDeviceToDevice, dst_stream);
-            } else {
-                copy_err = cudaMemcpyPeerAsync(dst_ptr, dst_device, src_ptr, src_device, copy_bytes, dst_stream);
-                transfer_ops++;
-                transfer_bytes += static_cast<uint64_t>(copy_bytes);
+    {
+        NvtxRangeGuard nvtx_swap_copy("swap.transfer.copy_submit");
+        for (int dst_idx = 0; dst_idx < num_devices; dst_idx++) {
+            int dst_device = devices_[dst_idx].index();
+            cudaSetDevice(dst_device);
+            cudaStream_t dst_stream = 0;
+            if (p2p_exec_ready_ && dst_idx < static_cast<int>(p2p_streams_.size()) && p2p_streams_[dst_idx] != nullptr) {
+                dst_stream = p2p_streams_[dst_idx];
             }
             if (log_first_round_debug) {
-                SPDLOG_INFO(
-                    "P2P debug round {}: storage={} copy_type={} partition=p{} src_device={} src_slot={} dst_device={} dst_slot={} bytes={} stream_ptr={}",
-                    next_round_id, filename_, (src_idx == dst_idx ? "D2D-local" : "P2P"), part_id, src_device, src_slot, dst_device, dst_slot,
-                    copy_bytes, static_cast<void *>(dst_stream));
+                SPDLOG_INFO("P2P debug round {}: storage={} dst_device={} stream_ptr={} stream_source={}",
+                            next_round_id, filename_, dst_device, static_cast<void *>(dst_stream), (dst_stream == 0 ? "default" : "custom"));
             }
-            if (copy_err != cudaSuccess) {
-                SPDLOG_ERROR("P2P copy failed for p{} {}:{} -> {}:{} with error {}", part_id, src_idx, src_slot, dst_idx, dst_slot,
-                             cudaGetErrorString(copy_err));
-                throw std::runtime_error("");
+            char *dst_base = static_cast<char *>(next_gpu_views[dst_idx].data_ptr());
+            int64_t dst_slot_bytes = buffers_[dst_idx]->getSlotBytes();
+            for (int dst_slot = 0; dst_slot < next_states[dst_idx].size(0); dst_slot++) {
+                int part_id = next_states[dst_idx][dst_slot].item<int>();
+                if (part_id >= owner_gpu.size() || owner_gpu[part_id] < 0) {
+                    SPDLOG_ERROR("P2P swap owner lookup failed for partition {}", part_id);
+                    throw std::runtime_error("");
+                }
+
+                int src_idx = owner_gpu[part_id];
+                int src_slot = owner_slot[part_id];
+                int src_device = devices_[src_idx].index();
+                char *src_base = static_cast<char *>(buffers_[src_idx]->buffer_tensor_gpu_view_.data_ptr());
+                int64_t src_slot_bytes = buffers_[src_idx]->getSlotBytes();
+                int64_t copy_bytes = buffers_[src_idx]->getPartitionBytes(part_id);
+
+                char *dst_ptr = dst_base + dst_slot * dst_slot_bytes;
+                char *src_ptr = src_base + src_slot * src_slot_bytes;
+
+                cudaError_t copy_err;
+                if (src_idx == dst_idx) {
+                    copy_err = cudaMemcpyAsync(dst_ptr, src_ptr, copy_bytes, cudaMemcpyDeviceToDevice, dst_stream);
+                    d2d_copy_ops++;
+                } else {
+                    copy_err = cudaMemcpyPeerAsync(dst_ptr, dst_device, src_ptr, src_device, copy_bytes, dst_stream);
+                    transfer_ops++;
+                    transfer_bytes += static_cast<uint64_t>(copy_bytes);
+                }
+                total_copy_bytes += static_cast<uint64_t>(copy_bytes);
+                if (log_first_round_debug) {
+                    SPDLOG_INFO(
+                        "P2P debug round {}: storage={} copy_type={} partition=p{} src_device={} src_slot={} dst_device={} dst_slot={} bytes={} stream_ptr={}",
+                        next_round_id, filename_, (src_idx == dst_idx ? "D2D-local" : "P2P"), part_id, src_device, src_slot, dst_device, dst_slot,
+                        copy_bytes, static_cast<void *>(dst_stream));
+                }
+                if (copy_err != cudaSuccess) {
+                    SPDLOG_ERROR("P2P copy failed for p{} {}:{} -> {}:{} with error {}", part_id, src_idx, src_slot, dst_idx, dst_slot,
+                                 cudaGetErrorString(copy_err));
+                    throw std::runtime_error("");
+                }
             }
         }
     }
 
-    for (int dst_idx = 0; dst_idx < num_devices; dst_idx++) {
-        cudaSetDevice(devices_[dst_idx].index());
-        cudaError_t sync_err = cudaSuccess;
-        if (p2p_exec_ready_ &&
-            dst_idx < static_cast<int>(p2p_streams_.size()) &&
-            p2p_streams_[dst_idx] != nullptr &&
-            dst_idx < static_cast<int>(p2p_events_.size()) &&
-            p2p_events_[dst_idx] != nullptr) {
-            if (log_first_round_debug) {
-                SPDLOG_INFO("P2P debug round {}: storage={} dst_device={} sync_mode=event stream_ptr={} event_ptr={}", next_round_id, filename_,
-                            devices_[dst_idx].index(), static_cast<void *>(p2p_streams_[dst_idx]), static_cast<void *>(p2p_events_[dst_idx]));
+    auto sync_start = std::chrono::steady_clock::now();
+    int sync_event_devices = 0;
+    int sync_default_devices = 0;
+    {
+        NvtxRangeGuard nvtx_swap_sync("swap.transfer.sync");
+        for (int dst_idx = 0; dst_idx < num_devices; dst_idx++) {
+            cudaSetDevice(devices_[dst_idx].index());
+            cudaError_t sync_err = cudaSuccess;
+            if (p2p_exec_ready_ &&
+                dst_idx < static_cast<int>(p2p_streams_.size()) &&
+                p2p_streams_[dst_idx] != nullptr &&
+                dst_idx < static_cast<int>(p2p_events_.size()) &&
+                p2p_events_[dst_idx] != nullptr) {
+                if (log_first_round_debug) {
+                    SPDLOG_INFO("P2P debug round {}: storage={} dst_device={} sync_mode=event stream_ptr={} event_ptr={}", next_round_id, filename_,
+                                devices_[dst_idx].index(), static_cast<void *>(p2p_streams_[dst_idx]), static_cast<void *>(p2p_events_[dst_idx]));
+                }
+                cudaError_t record_err = cudaEventRecord(p2p_events_[dst_idx], p2p_streams_[dst_idx]);
+                if (record_err != cudaSuccess) {
+                    SPDLOG_ERROR("P2P swap event record failed on device {}: {}", devices_[dst_idx].index(), cudaGetErrorString(record_err));
+                    throw std::runtime_error("");
+                }
+                sync_err = cudaEventSynchronize(p2p_events_[dst_idx]);
+                sync_event_devices++;
+            } else {
+                if (log_first_round_debug) {
+                    SPDLOG_INFO("P2P debug round {}: storage={} dst_device={} sync_mode=default_stream", next_round_id, filename_, devices_[dst_idx].index());
+                }
+                sync_err = cudaStreamSynchronize(0);
+                sync_default_devices++;
             }
-            cudaError_t record_err = cudaEventRecord(p2p_events_[dst_idx], p2p_streams_[dst_idx]);
-            if (record_err != cudaSuccess) {
-                SPDLOG_ERROR("P2P swap event record failed on device {}: {}", devices_[dst_idx].index(), cudaGetErrorString(record_err));
+            if (sync_err != cudaSuccess) {
+                SPDLOG_ERROR("P2P swap stream/event sync failed on device {}: {}", devices_[dst_idx].index(), cudaGetErrorString(sync_err));
                 throw std::runtime_error("");
             }
-            sync_err = cudaEventSynchronize(p2p_events_[dst_idx]);
-        } else {
-            if (log_first_round_debug) {
-                SPDLOG_INFO("P2P debug round {}: storage={} dst_device={} sync_mode=default_stream", next_round_id, filename_, devices_[dst_idx].index());
-            }
-            sync_err = cudaStreamSynchronize(0);
         }
-        if (sync_err != cudaSuccess) {
-            SPDLOG_ERROR("P2P swap stream/event sync failed on device {}: {}", devices_[dst_idx].index(), cudaGetErrorString(sync_err));
-            throw std::runtime_error("");
-        }
+    }
+    auto sync_end = std::chrono::steady_clock::now();
+    if (debug_subgraph_enabled()) {
+        auto sync_ms = std::chrono::duration_cast<std::chrono::milliseconds>(sync_end - sync_start).count();
+        SPDLOG_INFO("SWAP round={} storage={} d2d_copies={} p2p_copies={} total_copy_bytes={} p2p_copy_bytes={} sync_event_devices={} sync_default_devices={} sync_ms={}",
+                    next_round_id,
+                    filename_,
+                    d2d_copy_ops,
+                    transfer_ops,
+                    total_copy_bytes,
+                    transfer_bytes,
+                    sync_event_devices,
+                    sync_default_devices,
+                    sync_ms);
     }
 
     for (int device_idx = 0; device_idx < num_devices; device_idx++) {
