@@ -155,12 +155,29 @@ std::string get_directory(std::string filename) {
     return directory;
 }
 
-std::tuple<torch::Tensor, std::vector<torch::Tensor>> map_tensors(std::vector<torch::Tensor> unmapped_tensors) {
-    for (auto tensor : unmapped_tensors) {
+namespace {
+void validate_tensor_map_inputs(const std::vector<torch::Tensor> &unmapped_tensors) {
+    for (const auto &tensor : unmapped_tensors) {
         if (tensor.sizes().size() > 1) {
             throw GegeRuntimeException("Input tensors must be 1D");
         }
     }
+}
+
+std::vector<torch::Tensor> split_mapped_tensor(const torch::Tensor &mapped_all_ids, const std::vector<torch::Tensor> &unmapped_tensors) {
+    std::vector<torch::Tensor> mapped_tensors;
+    int64_t offset = 0;
+    for (const auto &tensor : unmapped_tensors) {
+        int64_t size = tensor.size(0);
+        mapped_tensors.emplace_back(mapped_all_ids.narrow(0, offset, size));
+        offset += size;
+    }
+    return mapped_tensors;
+}
+}  // namespace
+
+std::tuple<torch::Tensor, std::vector<torch::Tensor>> map_tensors(std::vector<torch::Tensor> unmapped_tensors) {
+    validate_tensor_map_inputs(unmapped_tensors);
 
     torch::Tensor all_ids = torch::cat(unmapped_tensors);
 
@@ -169,17 +186,69 @@ std::tuple<torch::Tensor, std::vector<torch::Tensor>> map_tensors(std::vector<to
     torch::Tensor map = std::get<0>(unique_tup);
     torch::Tensor mapped_all_ids = std::get<1>(unique_tup);
 
-    std::vector<torch::Tensor> mapped_tensors;
+    return std::forward_as_tuple(map, split_mapped_tensor(mapped_all_ids, unmapped_tensors));
+}
 
-    int64_t offset = 0;
-    int64_t size;
-    for (auto tensor : unmapped_tensors) {
-        size = tensor.size(0);
-        mapped_tensors.emplace_back(mapped_all_ids.narrow(0, offset, size));
-        offset += size;
+std::tuple<torch::Tensor, std::vector<torch::Tensor>> map_tensors_dense_range(std::vector<torch::Tensor> unmapped_tensors, int64_t id_space_size) {
+    validate_tensor_map_inputs(unmapped_tensors);
+
+    if (id_space_size <= 0) {
+        throw GegeRuntimeException("map_tensors_dense_range id_space_size must be positive");
     }
 
-    return std::forward_as_tuple(map, mapped_tensors);
+    torch::Tensor all_ids = torch::cat(unmapped_tensors);
+    if (all_ids.scalar_type() != torch::kInt64) {
+        all_ids = all_ids.to(torch::kInt64);
+    }
+
+    if (all_ids.numel() == 0) {
+        torch::Tensor empty_map = torch::empty({0}, all_ids.options().dtype(torch::kInt64));
+        return std::forward_as_tuple(empty_map, split_mapped_tensor(empty_map, unmapped_tensors));
+    }
+
+    int64_t min_id = all_ids.min().item<int64_t>();
+    int64_t max_id = all_ids.max().item<int64_t>();
+    if (min_id < 0 || max_id >= id_space_size) {
+        throw GegeRuntimeException("map_tensors_dense_range found IDs outside [0, id_space_size)");
+    }
+
+    auto bool_opts = torch::TensorOptions().dtype(torch::kBool).device(all_ids.device());
+    torch::Tensor present = torch::zeros({id_space_size}, bool_opts);
+    present.index_fill_(0, all_ids, true);
+
+    torch::Tensor map = torch::nonzero(present).flatten(0, 1).to(torch::kInt64);
+
+    auto idx_opts = torch::TensorOptions().dtype(torch::kInt64).device(all_ids.device());
+    torch::Tensor inverse_lut = torch::full({id_space_size}, -1, idx_opts);
+    inverse_lut.index_put_({map}, torch::arange(map.size(0), idx_opts));
+
+    torch::Tensor mapped_all_ids = inverse_lut.index_select(0, all_ids);
+    return std::forward_as_tuple(map, split_mapped_tensor(mapped_all_ids, unmapped_tensors));
+}
+
+std::tuple<torch::Tensor, std::vector<torch::Tensor>> map_tensors_identity_range(std::vector<torch::Tensor> unmapped_tensors, int64_t id_space_size) {
+    validate_tensor_map_inputs(unmapped_tensors);
+
+    if (id_space_size <= 0) {
+        throw GegeRuntimeException("map_tensors_identity_range id_space_size must be positive");
+    }
+
+    torch::Tensor all_ids = torch::cat(unmapped_tensors);
+    if (all_ids.scalar_type() != torch::kInt64) {
+        all_ids = all_ids.to(torch::kInt64);
+    }
+
+    if (all_ids.numel() > 0) {
+        int64_t min_id = all_ids.min().item<int64_t>();
+        int64_t max_id = all_ids.max().item<int64_t>();
+        if (min_id < 0 || max_id >= id_space_size) {
+            throw GegeRuntimeException("map_tensors_identity_range found IDs outside [0, id_space_size)");
+        }
+    }
+
+    auto idx_opts = torch::TensorOptions().dtype(torch::kInt64).device(all_ids.device());
+    torch::Tensor map = torch::arange(id_space_size, idx_opts);
+    return std::forward_as_tuple(map, split_mapped_tensor(all_ids, unmapped_tensors));
 }
 
 // TODO this function uses a searchsorted to find the approriate value in the map tensor

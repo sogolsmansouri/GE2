@@ -4,11 +4,20 @@
 #include "data/ordering.h"
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <sstream>
 
 namespace {
+enum class BatchIdMapMode {
+    Unique2,
+    DenseRange,
+    IdentityResident,
+    Adaptive,
+};
+
 bool profile_timing_enabled() {
     static const bool enabled = []() {
         const char *env = std::getenv("GEGE_PROFILE_TIMING");
@@ -29,6 +38,78 @@ bool debug_subgraph_enabled() {
         return !(env[0] == '\0' || (env[0] == '0' && env[1] == '\0'));
     }();
     return enabled;
+}
+
+BatchIdMapMode batch_id_map_mode() {
+    static const BatchIdMapMode mode = []() {
+        const char *env = std::getenv("GEGE_BATCH_ID_MAP");
+        if (env == nullptr) {
+            return BatchIdMapMode::Unique2;
+        }
+        std::string mode(env);
+        std::transform(mode.begin(), mode.end(), mode.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+        if (mode == "identity" || mode == "identity_resident" || mode == "resident_identity") {
+            return BatchIdMapMode::IdentityResident;
+        }
+
+        if (mode == "adaptive" || mode == "auto") {
+            return BatchIdMapMode::Adaptive;
+        }
+
+        if (mode == "1" || mode == "true" || mode == "dense" || mode == "offset" || mode == "nosort" || mode == "dense_range") {
+            return BatchIdMapMode::DenseRange;
+        }
+
+        return BatchIdMapMode::Unique2;
+    }();
+    return mode;
+}
+
+double batch_id_map_adaptive_threshold() {
+    static const double threshold = []() {
+        const char *env = std::getenv("GEGE_BATCH_ID_MAP_ADAPTIVE_OCC_THRESHOLD");
+        if (env == nullptr || env[0] == '\0') {
+            return 0.5;
+        }
+        double v = std::atof(env);
+        if (v < 0.0) {
+            return 0.0;
+        }
+        if (v > 1.0) {
+            return 1.0;
+        }
+        return v;
+    }();
+    return threshold;
+}
+
+int64_t batch_id_map_log_every() {
+    static const int64_t n = []() {
+        const char *env = std::getenv("GEGE_BATCH_ID_MAP_LOG_EVERY");
+        if (env == nullptr || env[0] == '\0') {
+            return static_cast<int64_t>(0);
+        }
+        int64_t v = std::atoll(env);
+        return v > 0 ? v : static_cast<int64_t>(0);
+    }();
+    return n;
+}
+
+const char *batch_id_map_mode_name(BatchIdMapMode mode) {
+    switch (mode) {
+        case BatchIdMapMode::Unique2:
+            return "unique2";
+        case BatchIdMapMode::DenseRange:
+            return "dense_range";
+        case BatchIdMapMode::IdentityResident:
+            return "identity_resident";
+        case BatchIdMapMode::Adaptive:
+            return "adaptive";
+        default:
+            return "unknown";
+    }
 }
 } // namespace
 
@@ -780,7 +861,7 @@ void DataLoader::edgeSample(shared_ptr<Batch> batch, int32_t device_idx) {
     // std::cout << batch->edges_.sizes() << " " <<  batch->src_neg_indices_.sizes() << " " << batch->dst_neg_indices_.sizes() << std::endl;
 
     // int32_t false_negative_edges_src = 0;
-    // int32_t false_negative_edges_dst = 0;
+    // int32_t false_negative_edges_dst = 0;                    
     // for (int32_t i = 0; i < 20; i++) {
     //     for (int32_t j = 0; j < batch->src_neg_indices_.size(1); j++) {
     //         if (batch->edges_[i][0].item<int64_t>() == batch->src_neg_indices_[i / 500][j].item<int64_t>()) {
@@ -843,10 +924,52 @@ void DataLoader::edgeSample(shared_ptr<Batch> batch, int32_t device_idx) {
         }
     } else {
         // map edges and negatives to their corresponding index in unique_node_indices_
-        auto tup = map_tensors(all_ids);
+        std::tuple<torch::Tensor, std::vector<torch::Tensor>> tup;
+        BatchIdMapMode id_map_mode = batch_id_map_mode();
+        BatchIdMapMode selected_mode = id_map_mode;
+        int64_t id_space_size = -1;
+        double occ_estimate = -1.0;
+
+        if (id_map_mode != BatchIdMapMode::Unique2 && graph_storage_->useInMemorySubGraph()) {
+            id_space_size = graph_storage_->getNumNodesInMemory(device_idx);
+            if (id_map_mode == BatchIdMapMode::Adaptive) {
+                int64_t all_ids_numel = 0;
+                for (const auto &ids : all_ids) {
+                    all_ids_numel += ids.numel();
+                }
+                occ_estimate = id_space_size > 0 ? std::min(1.0, static_cast<double>(all_ids_numel) / static_cast<double>(id_space_size)) : 1.0;
+                selected_mode = occ_estimate >= batch_id_map_adaptive_threshold() ? BatchIdMapMode::IdentityResident : BatchIdMapMode::DenseRange;
+            }
+
+            if (selected_mode == BatchIdMapMode::IdentityResident) {
+                tup = map_tensors_identity_range(all_ids, id_space_size);
+            } else {
+                tup = map_tensors_dense_range(all_ids, id_space_size);
+            }
+        } else {
+            selected_mode = BatchIdMapMode::Unique2;
+            tup = map_tensors(all_ids);
+        }
     
 
         batch->unique_node_indices_ = std::get<0>(tup);
+
+        static std::atomic<int64_t> map_call_count{0};
+        int64_t log_every = batch_id_map_log_every();
+        if (log_every > 0) {
+            int64_t call_idx = map_call_count.fetch_add(1) + 1;
+            if (call_idx % log_every == 0) {
+                SPDLOG_INFO(
+                    "BatchIdMap: call={} requested={} selected={} device={} id_space_size={} unique_rows={} occ_estimate={:.4f}",
+                    call_idx,
+                    batch_id_map_mode_name(id_map_mode),
+                    batch_id_map_mode_name(selected_mode),
+                    device_idx,
+                    id_space_size,
+                    batch->unique_node_indices_.size(0),
+                    occ_estimate);
+            }
+        }
 
         if (batch->unique_node_indices_[0].item<int64_t>() == -1) {
             SPDLOG_ERROR("Node mapping is broken. Try repartition again.");

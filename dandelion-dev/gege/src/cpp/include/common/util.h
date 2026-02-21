@@ -81,4 +81,8 @@ bool instance_of(std::shared_ptr<T1> instance) {
 
 std::tuple<torch::Tensor, std::vector<torch::Tensor>> map_tensors(std::vector<torch::Tensor> unmapped_tensors);
 
+std::tuple<torch::Tensor, std::vector<torch::Tensor>> map_tensors_dense_range(std::vector<torch::Tensor> unmapped_tensors, int64_t id_space_size);
+
+std::tuple<torch::Tensor, std::vector<torch::Tensor>> map_tensors_identity_range(std::vector<torch::Tensor> unmapped_tensors, int64_t id_space_size);
+
 std::vector<torch::Tensor> apply_tensor_map(torch::Tensor map, std::vector<torch::Tensor> unmapped_tensors);
