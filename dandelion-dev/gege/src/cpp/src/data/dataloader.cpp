@@ -8,7 +8,9 @@
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
+#include <mutex>
 #include <sstream>
+#include <unordered_map>
 
 namespace {
 enum class BatchIdMapMode {
@@ -85,6 +87,44 @@ double batch_id_map_adaptive_threshold() {
     return threshold;
 }
 
+double batch_id_map_adaptive_high_threshold() {
+    static const double threshold = []() {
+        const char *env = std::getenv("GEGE_BATCH_ID_MAP_ADAPTIVE_OCC_THRESHOLD_HIGH");
+        if (env != nullptr && env[0] != '\0') {
+            double v = std::atof(env);
+            if (v < 0.0) {
+                return 0.0;
+            }
+            if (v > 1.0) {
+                return 1.0;
+            }
+            return v;
+        }
+        return batch_id_map_adaptive_threshold();
+    }();
+    return threshold;
+}
+
+double batch_id_map_adaptive_low_threshold() {
+    static const double threshold = []() {
+        const char *env = std::getenv("GEGE_BATCH_ID_MAP_ADAPTIVE_OCC_THRESHOLD_LOW");
+        if (env != nullptr && env[0] != '\0') {
+            double v = std::atof(env);
+            if (v < 0.0) {
+                return 0.0;
+            }
+            if (v > 1.0) {
+                return 1.0;
+            }
+            return v;
+        }
+        double hi = batch_id_map_adaptive_high_threshold();
+        double lo = hi - 0.2;
+        return lo < 0.0 ? 0.0 : lo;
+    }();
+    return threshold;
+}
+
 int64_t batch_id_map_log_every() {
     static const int64_t n = []() {
         const char *env = std::getenv("GEGE_BATCH_ID_MAP_LOG_EVERY");
@@ -110,6 +150,34 @@ const char *batch_id_map_mode_name(BatchIdMapMode mode) {
         default:
             return "unknown";
     }
+}
+
+BatchIdMapMode choose_adaptive_batch_id_map_mode(int32_t device_idx, double occ_estimate) {
+    static std::mutex mode_mutex;
+    static std::unordered_map<int32_t, BatchIdMapMode> last_mode_by_device;
+
+    double high = batch_id_map_adaptive_high_threshold();
+    double low = batch_id_map_adaptive_low_threshold();
+    if (low > high) {
+        low = high;
+    }
+
+    std::lock_guard<std::mutex> lock(mode_mutex);
+    BatchIdMapMode last_mode = BatchIdMapMode::DenseRange;
+    auto it = last_mode_by_device.find(device_idx);
+    if (it != last_mode_by_device.end()) {
+        last_mode = it->second;
+    }
+
+    BatchIdMapMode selected = last_mode;
+    if (last_mode == BatchIdMapMode::IdentityResident) {
+        selected = (occ_estimate <= low) ? BatchIdMapMode::DenseRange : BatchIdMapMode::IdentityResident;
+    } else {
+        selected = (occ_estimate >= high) ? BatchIdMapMode::IdentityResident : BatchIdMapMode::DenseRange;
+    }
+
+    last_mode_by_device[device_idx] = selected;
+    return selected;
 }
 } // namespace
 
@@ -928,17 +996,19 @@ void DataLoader::edgeSample(shared_ptr<Batch> batch, int32_t device_idx) {
         BatchIdMapMode id_map_mode = batch_id_map_mode();
         BatchIdMapMode selected_mode = id_map_mode;
         int64_t id_space_size = -1;
+        int64_t all_ids_numel = 0;
         double occ_estimate = -1.0;
+        double actual_occupancy = -1.0;
 
         if (id_map_mode != BatchIdMapMode::Unique2 && graph_storage_->useInMemorySubGraph()) {
             id_space_size = graph_storage_->getNumNodesInMemory(device_idx);
+            for (const auto &ids : all_ids) {
+                all_ids_numel += ids.numel();
+            }
+
             if (id_map_mode == BatchIdMapMode::Adaptive) {
-                int64_t all_ids_numel = 0;
-                for (const auto &ids : all_ids) {
-                    all_ids_numel += ids.numel();
-                }
                 occ_estimate = id_space_size > 0 ? std::min(1.0, static_cast<double>(all_ids_numel) / static_cast<double>(id_space_size)) : 1.0;
-                selected_mode = occ_estimate >= batch_id_map_adaptive_threshold() ? BatchIdMapMode::IdentityResident : BatchIdMapMode::DenseRange;
+                selected_mode = choose_adaptive_batch_id_map_mode(device_idx, occ_estimate);
             }
 
             if (selected_mode == BatchIdMapMode::IdentityResident) {
@@ -950,9 +1020,12 @@ void DataLoader::edgeSample(shared_ptr<Batch> batch, int32_t device_idx) {
             selected_mode = BatchIdMapMode::Unique2;
             tup = map_tensors(all_ids);
         }
-    
+
 
         batch->unique_node_indices_ = std::get<0>(tup);
+        if (id_space_size > 0) {
+            actual_occupancy = std::min(1.0, static_cast<double>(batch->unique_node_indices_.size(0)) / static_cast<double>(id_space_size));
+        }
 
         static std::atomic<int64_t> map_call_count{0};
         int64_t log_every = batch_id_map_log_every();
@@ -960,14 +1033,16 @@ void DataLoader::edgeSample(shared_ptr<Batch> batch, int32_t device_idx) {
             int64_t call_idx = map_call_count.fetch_add(1) + 1;
             if (call_idx % log_every == 0) {
                 SPDLOG_INFO(
-                    "BatchIdMap: call={} requested={} selected={} device={} id_space_size={} unique_rows={} occ_estimate={:.4f}",
+                    "BatchIdMap: call={} requested={} selected={} device={} id_space_size={} all_ids_numel={} unique_rows={} occ_estimate={:.4f} occ_actual={:.4f}",
                     call_idx,
                     batch_id_map_mode_name(id_map_mode),
                     batch_id_map_mode_name(selected_mode),
                     device_idx,
                     id_space_size,
+                    all_ids_numel,
                     batch->unique_node_indices_.size(0),
-                    occ_estimate);
+                    occ_estimate,
+                    actual_occupancy);
             }
         }
 
