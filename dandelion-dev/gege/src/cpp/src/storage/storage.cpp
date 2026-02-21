@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <cstdlib>
 #include <atomic>
+#include <sstream>
 
 #if defined(GEGE_CUDA) && __has_include(<nvtx3/nvToolsExt.h>)
 #include <nvtx3/nvToolsExt.h>
@@ -423,6 +424,9 @@ void MemPartitionBufferStorage::performNextSwapP2P_() {
         for (int i = 0; i < current_states[device_idx].size(0); i++) {
             max_partition_id = std::max(max_partition_id, current_states[device_idx][i].item<int>());
         }
+        for (int i = 0; i < next_states[device_idx].size(0); i++) {
+            max_partition_id = std::max(max_partition_id, next_states[device_idx][i].item<int>());
+        }
     }
 
     if (max_partition_id < 0) {
@@ -434,9 +438,69 @@ void MemPartitionBufferStorage::performNextSwapP2P_() {
     for (int device_idx = 0; device_idx < num_devices; device_idx++) {
         for (int slot = 0; slot < current_states[device_idx].size(0); slot++) {
             int part_id = current_states[device_idx][slot].item<int>();
+            if (part_id < 0) {
+                continue;
+            }
             owner_gpu[part_id] = device_idx;
             owner_slot[part_id] = slot;
         }
+    }
+
+    // Some schedules may request a next partition that is not currently owned by any GPU.
+    // In that case, fall back to the existing CPU<->GPU swap path for this coordinated round
+    // instead of aborting training.
+    std::vector<int> missing_owner_partitions;
+    for (int dst_idx = 0; dst_idx < num_devices; dst_idx++) {
+        for (int dst_slot = 0; dst_slot < next_states[dst_idx].size(0); dst_slot++) {
+            int part_id = next_states[dst_idx][dst_slot].item<int>();
+            if (part_id < 0 || part_id >= static_cast<int>(owner_gpu.size()) || owner_gpu[part_id] < 0) {
+                missing_owner_partitions.emplace_back(part_id);
+            }
+        }
+    }
+    if (!missing_owner_partitions.empty()) {
+        std::sort(missing_owner_partitions.begin(), missing_owner_partitions.end());
+        missing_owner_partitions.erase(std::unique(missing_owner_partitions.begin(), missing_owner_partitions.end()), missing_owner_partitions.end());
+
+        uint64_t one_way_bytes_total = 0;
+        int fallback_devices = 0;
+        for (int device_idx = 0; device_idx < num_devices; device_idx++) {
+            if (!has_swap[device_idx]) {
+                continue;
+            }
+            uint64_t one_way_bytes = static_cast<uint64_t>(buffers_[device_idx]->getSlotBytes()) * static_cast<uint64_t>(options_->buffer_capacity);
+            one_way_bytes_total += one_way_bytes;
+            buffers_[device_idx]->performNextSwap();
+            fallback_devices++;
+        }
+
+        std::ostringstream sample_stream;
+        int show_n = std::min(static_cast<int>(missing_owner_partitions.size()), 16);
+        for (int i = 0; i < show_n; i++) {
+            if (i > 0) {
+                sample_stream << ",";
+            }
+            sample_stream << missing_owner_partitions[i];
+        }
+
+        uint64_t round_id = 0;
+        {
+            std::lock_guard<std::mutex> lock(comm_stats_mutex_);
+            coordinated_swap_round_++;
+            round_id = coordinated_swap_round_;
+            epoch_h2d_bytes_ += one_way_bytes_total;
+            epoch_d2h_bytes_ += one_way_bytes_total;
+        }
+        SPDLOG_WARN(
+            "Swap comm round {} [CPU<->GPU fallback] storage={} devices={} missing_owner_partitions={} sample=[{}] d2h_bytes={} ({:.2f} MiB) h2d_bytes={} ({:.2f} MiB)",
+            round_id,
+            filename_,
+            fallback_devices,
+            missing_owner_partitions.size(),
+            sample_stream.str(),
+            one_way_bytes_total, static_cast<double>(one_way_bytes_total) / (1024.0 * 1024.0),
+            one_way_bytes_total, static_cast<double>(one_way_bytes_total) / (1024.0 * 1024.0));
+        return;
     }
 
     std::vector<torch::Tensor> next_gpu_views(num_devices);
@@ -472,7 +536,7 @@ void MemPartitionBufferStorage::performNextSwapP2P_() {
             int64_t dst_slot_bytes = buffers_[dst_idx]->getSlotBytes();
             for (int dst_slot = 0; dst_slot < next_states[dst_idx].size(0); dst_slot++) {
                 int part_id = next_states[dst_idx][dst_slot].item<int>();
-                if (part_id >= owner_gpu.size() || owner_gpu[part_id] < 0) {
+                if (part_id < 0 || part_id >= static_cast<int>(owner_gpu.size()) || owner_gpu[part_id] < 0) {
                     SPDLOG_ERROR("P2P swap owner lookup failed for partition {}", part_id);
                     throw std::runtime_error("");
                 }
