@@ -447,13 +447,18 @@ void MemPartitionBufferStorage::performNextSwapP2P_() {
     }
 
     // Some schedules may request a next partition that is not currently owned by any GPU.
-    // In that case, fall back to the existing CPU<->GPU swap path for this coordinated round
-    // instead of aborting training.
+    // Keep P2P enabled for devices that have complete ownership coverage and fall back only
+    // for devices that require missing-owner partitions.
+    std::vector<bool> requires_cpu_fallback(num_devices, false);
     std::vector<int> missing_owner_partitions;
     for (int dst_idx = 0; dst_idx < num_devices; dst_idx++) {
+        if (!has_swap[dst_idx]) {
+            continue;
+        }
         for (int dst_slot = 0; dst_slot < next_states[dst_idx].size(0); dst_slot++) {
             int part_id = next_states[dst_idx][dst_slot].item<int>();
             if (part_id < 0 || part_id >= static_cast<int>(owner_gpu.size()) || owner_gpu[part_id] < 0) {
+                requires_cpu_fallback[dst_idx] = true;
                 missing_owner_partitions.emplace_back(part_id);
             }
         }
@@ -461,73 +466,49 @@ void MemPartitionBufferStorage::performNextSwapP2P_() {
     if (!missing_owner_partitions.empty()) {
         std::sort(missing_owner_partitions.begin(), missing_owner_partitions.end());
         missing_owner_partitions.erase(std::unique(missing_owner_partitions.begin(), missing_owner_partitions.end()), missing_owner_partitions.end());
+    }
 
-        uint64_t one_way_bytes_total = 0;
-        int fallback_devices = 0;
-        for (int device_idx = 0; device_idx < num_devices; device_idx++) {
-            if (!has_swap[device_idx]) {
-                continue;
-            }
-            uint64_t one_way_bytes = static_cast<uint64_t>(buffers_[device_idx]->getSlotBytes()) * static_cast<uint64_t>(options_->buffer_capacity);
-            one_way_bytes_total += one_way_bytes;
-            buffers_[device_idx]->performNextSwap();
-            fallback_devices++;
+    int p2p_devices = 0;
+    for (int device_idx = 0; device_idx < num_devices; device_idx++) {
+        if (has_swap[device_idx] && !requires_cpu_fallback[device_idx]) {
+            p2p_devices++;
         }
-
-        std::ostringstream sample_stream;
-        int show_n = std::min(static_cast<int>(missing_owner_partitions.size()), 16);
-        for (int i = 0; i < show_n; i++) {
-            if (i > 0) {
-                sample_stream << ",";
-            }
-            sample_stream << missing_owner_partitions[i];
-        }
-
-        uint64_t round_id = 0;
-        {
-            std::lock_guard<std::mutex> lock(comm_stats_mutex_);
-            coordinated_swap_round_++;
-            round_id = coordinated_swap_round_;
-            epoch_h2d_bytes_ += one_way_bytes_total;
-            epoch_d2h_bytes_ += one_way_bytes_total;
-        }
-        SPDLOG_WARN(
-            "Swap comm round {} [CPU<->GPU fallback] storage={} devices={} missing_owner_partitions={} sample=[{}] d2h_bytes={} ({:.2f} MiB) h2d_bytes={} ({:.2f} MiB)",
-            round_id,
-            filename_,
-            fallback_devices,
-            missing_owner_partitions.size(),
-            sample_stream.str(),
-            one_way_bytes_total, static_cast<double>(one_way_bytes_total) / (1024.0 * 1024.0),
-            one_way_bytes_total, static_cast<double>(one_way_bytes_total) / (1024.0 * 1024.0));
-        return;
     }
 
     std::vector<torch::Tensor> next_gpu_views(num_devices);
     for (int device_idx = 0; device_idx < num_devices; device_idx++) {
-        next_gpu_views[device_idx] = torch::empty_like(buffers_[device_idx]->buffer_tensor_gpu_view_);
+        if (has_swap[device_idx] && !requires_cpu_fallback[device_idx]) {
+            next_gpu_views[device_idx] = torch::empty_like(buffers_[device_idx]->buffer_tensor_gpu_view_);
+        }
     }
 
     int transfer_ops = 0;
     int d2d_copy_ops = 0;
     uint64_t total_copy_bytes = 0;
     uint64_t transfer_bytes = 0;
+    uint64_t fallback_one_way_bytes_total = 0;
+    int fallback_devices = 0;
     uint64_t next_round_id = 0;
     {
         std::lock_guard<std::mutex> lock(comm_stats_mutex_);
         next_round_id = coordinated_swap_round_ + 1;
     }
     const bool log_first_round_debug = (next_round_id == 1);
+    std::vector<bool> submitted_copy(num_devices, false);
 
-    {
+    if (p2p_devices > 0) {
         NvtxRangeGuard nvtx_swap_copy("swap.transfer.copy_submit");
         for (int dst_idx = 0; dst_idx < num_devices; dst_idx++) {
+            if (!has_swap[dst_idx] || requires_cpu_fallback[dst_idx]) {
+                continue;
+            }
             int dst_device = devices_[dst_idx].index();
             cudaSetDevice(dst_device);
             cudaStream_t dst_stream = 0;
             if (p2p_exec_ready_ && dst_idx < static_cast<int>(p2p_streams_.size()) && p2p_streams_[dst_idx] != nullptr) {
                 dst_stream = p2p_streams_[dst_idx];
             }
+            submitted_copy[dst_idx] = true;
             if (log_first_round_debug) {
                 SPDLOG_INFO("P2P debug round {}: storage={} dst_device={} stream_ptr={} stream_source={}",
                             next_round_id, filename_, dst_device, static_cast<void *>(dst_stream), (dst_stream == 0 ? "default" : "custom"));
@@ -576,64 +557,80 @@ void MemPartitionBufferStorage::performNextSwapP2P_() {
         }
     }
 
-    auto sync_start = std::chrono::steady_clock::now();
-    int sync_event_devices = 0;
-    int sync_default_devices = 0;
-    {
-        NvtxRangeGuard nvtx_swap_sync("swap.transfer.sync");
-        for (int dst_idx = 0; dst_idx < num_devices; dst_idx++) {
-            cudaSetDevice(devices_[dst_idx].index());
-            cudaError_t sync_err = cudaSuccess;
-            if (p2p_exec_ready_ &&
-                dst_idx < static_cast<int>(p2p_streams_.size()) &&
-                p2p_streams_[dst_idx] != nullptr &&
-                dst_idx < static_cast<int>(p2p_events_.size()) &&
-                p2p_events_[dst_idx] != nullptr) {
-                if (log_first_round_debug) {
-                    SPDLOG_INFO("P2P debug round {}: storage={} dst_device={} sync_mode=event stream_ptr={} event_ptr={}", next_round_id, filename_,
-                                devices_[dst_idx].index(), static_cast<void *>(p2p_streams_[dst_idx]), static_cast<void *>(p2p_events_[dst_idx]));
+    if (p2p_devices > 0) {
+        auto sync_start = std::chrono::steady_clock::now();
+        int sync_event_devices = 0;
+        int sync_default_devices = 0;
+        {
+            NvtxRangeGuard nvtx_swap_sync("swap.transfer.sync");
+            for (int dst_idx = 0; dst_idx < num_devices; dst_idx++) {
+                if (!submitted_copy[dst_idx]) {
+                    continue;
                 }
-                cudaError_t record_err = cudaEventRecord(p2p_events_[dst_idx], p2p_streams_[dst_idx]);
-                if (record_err != cudaSuccess) {
-                    SPDLOG_ERROR("P2P swap event record failed on device {}: {}", devices_[dst_idx].index(), cudaGetErrorString(record_err));
+                cudaSetDevice(devices_[dst_idx].index());
+                cudaError_t sync_err = cudaSuccess;
+                if (p2p_exec_ready_ &&
+                    dst_idx < static_cast<int>(p2p_streams_.size()) &&
+                    p2p_streams_[dst_idx] != nullptr &&
+                    dst_idx < static_cast<int>(p2p_events_.size()) &&
+                    p2p_events_[dst_idx] != nullptr) {
+                    if (log_first_round_debug) {
+                        SPDLOG_INFO("P2P debug round {}: storage={} dst_device={} sync_mode=event stream_ptr={} event_ptr={}", next_round_id, filename_,
+                                    devices_[dst_idx].index(), static_cast<void *>(p2p_streams_[dst_idx]), static_cast<void *>(p2p_events_[dst_idx]));
+                    }
+                    cudaError_t record_err = cudaEventRecord(p2p_events_[dst_idx], p2p_streams_[dst_idx]);
+                    if (record_err != cudaSuccess) {
+                        SPDLOG_ERROR("P2P swap event record failed on device {}: {}", devices_[dst_idx].index(), cudaGetErrorString(record_err));
+                        throw std::runtime_error("");
+                    }
+                    sync_err = cudaEventSynchronize(p2p_events_[dst_idx]);
+                    sync_event_devices++;
+                } else {
+                    if (log_first_round_debug) {
+                        SPDLOG_INFO("P2P debug round {}: storage={} dst_device={} sync_mode=default_stream", next_round_id, filename_, devices_[dst_idx].index());
+                    }
+                    sync_err = cudaStreamSynchronize(0);
+                    sync_default_devices++;
+                }
+                if (sync_err != cudaSuccess) {
+                    SPDLOG_ERROR("P2P swap stream/event sync failed on device {}: {}", devices_[dst_idx].index(), cudaGetErrorString(sync_err));
                     throw std::runtime_error("");
                 }
-                sync_err = cudaEventSynchronize(p2p_events_[dst_idx]);
-                sync_event_devices++;
-            } else {
-                if (log_first_round_debug) {
-                    SPDLOG_INFO("P2P debug round {}: storage={} dst_device={} sync_mode=default_stream", next_round_id, filename_, devices_[dst_idx].index());
-                }
-                sync_err = cudaStreamSynchronize(0);
-                sync_default_devices++;
-            }
-            if (sync_err != cudaSuccess) {
-                SPDLOG_ERROR("P2P swap stream/event sync failed on device {}: {}", devices_[dst_idx].index(), cudaGetErrorString(sync_err));
-                throw std::runtime_error("");
             }
         }
-    }
-    auto sync_end = std::chrono::steady_clock::now();
-    if (debug_subgraph_enabled()) {
-        auto sync_ms = std::chrono::duration_cast<std::chrono::milliseconds>(sync_end - sync_start).count();
-        SPDLOG_INFO("SWAP round={} storage={} d2d_copies={} p2p_copies={} total_copy_bytes={} p2p_copy_bytes={} sync_event_devices={} sync_default_devices={} sync_ms={}",
-                    next_round_id,
-                    filename_,
-                    d2d_copy_ops,
-                    transfer_ops,
-                    total_copy_bytes,
-                    transfer_bytes,
-                    sync_event_devices,
-                    sync_default_devices,
-                    sync_ms);
+        auto sync_end = std::chrono::steady_clock::now();
+        if (debug_subgraph_enabled()) {
+            auto sync_ms = std::chrono::duration_cast<std::chrono::milliseconds>(sync_end - sync_start).count();
+            SPDLOG_INFO("SWAP round={} storage={} d2d_copies={} p2p_copies={} total_copy_bytes={} p2p_copy_bytes={} sync_event_devices={} sync_default_devices={} sync_ms={}",
+                        next_round_id,
+                        filename_,
+                        d2d_copy_ops,
+                        transfer_ops,
+                        total_copy_bytes,
+                        transfer_bytes,
+                        sync_event_devices,
+                        sync_default_devices,
+                        sync_ms);
+        }
     }
 
     for (int device_idx = 0; device_idx < num_devices; device_idx++) {
-        if (has_swap[device_idx]) {
+        if (!has_swap[device_idx] || !requires_cpu_fallback[device_idx]) {
+            continue;
+        }
+        uint64_t one_way_bytes = static_cast<uint64_t>(buffers_[device_idx]->getSlotBytes()) * static_cast<uint64_t>(options_->buffer_capacity);
+        fallback_one_way_bytes_total += one_way_bytes;
+        buffers_[device_idx]->performNextSwap();
+        fallback_devices++;
+    }
+
+    for (int device_idx = 0; device_idx < num_devices; device_idx++) {
+        if (has_swap[device_idx] && !requires_cpu_fallback[device_idx]) {
             buffers_[device_idx]->buffer_tensor_gpu_view_ = next_gpu_views[device_idx];
             buffers_[device_idx]->finalizeExternalSwap(next_states[device_idx], true);
         }
     }
+
     uint64_t round_id = 0;
     {
         std::lock_guard<std::mutex> lock(comm_stats_mutex_);
@@ -641,10 +638,49 @@ void MemPartitionBufferStorage::performNextSwapP2P_() {
         round_id = coordinated_swap_round_;
         epoch_p2p_bytes_ += transfer_bytes;
         epoch_p2p_partition_copies_ += static_cast<uint64_t>(transfer_ops);
+        epoch_h2d_bytes_ += fallback_one_way_bytes_total;
+        epoch_d2h_bytes_ += fallback_one_way_bytes_total;
     }
-    SPDLOG_INFO("Swap comm round {} [P2P] storage={} inter_gpu_partition_copies={} inter_gpu_bytes={} ({:.2f} MiB)",
-                round_id, filename_, transfer_ops, transfer_bytes, static_cast<double>(transfer_bytes) / (1024.0 * 1024.0));
-    SPDLOG_INFO("P2P coordinated swap completed with {} inter-GPU partition copies", transfer_ops);
+
+    if (fallback_devices == 0) {
+        SPDLOG_INFO("Swap comm round {} [P2P] storage={} inter_gpu_partition_copies={} inter_gpu_bytes={} ({:.2f} MiB)",
+                    round_id, filename_, transfer_ops, transfer_bytes, static_cast<double>(transfer_bytes) / (1024.0 * 1024.0));
+        SPDLOG_INFO("P2P coordinated swap completed with {} inter-GPU partition copies", transfer_ops);
+        return;
+    }
+
+    std::ostringstream sample_stream;
+    int show_n = std::min(static_cast<int>(missing_owner_partitions.size()), 16);
+    for (int i = 0; i < show_n; i++) {
+        if (i > 0) {
+            sample_stream << ",";
+        }
+        sample_stream << missing_owner_partitions[i];
+    }
+
+    if (p2p_devices > 0) {
+        SPDLOG_WARN(
+            "Swap comm round {} [P2P+CPU fallback] storage={} p2p_devices={} fallback_devices={} missing_owner_partitions={} sample=[{}] inter_gpu_partition_copies={} inter_gpu_bytes={} ({:.2f} MiB) d2h_bytes={} ({:.2f} MiB) h2d_bytes={} ({:.2f} MiB)",
+            round_id,
+            filename_,
+            p2p_devices,
+            fallback_devices,
+            missing_owner_partitions.size(),
+            sample_stream.str(),
+            transfer_ops, transfer_bytes, static_cast<double>(transfer_bytes) / (1024.0 * 1024.0),
+            fallback_one_way_bytes_total, static_cast<double>(fallback_one_way_bytes_total) / (1024.0 * 1024.0),
+            fallback_one_way_bytes_total, static_cast<double>(fallback_one_way_bytes_total) / (1024.0 * 1024.0));
+    } else {
+        SPDLOG_WARN(
+            "Swap comm round {} [CPU<->GPU fallback] storage={} devices={} missing_owner_partitions={} sample=[{}] d2h_bytes={} ({:.2f} MiB) h2d_bytes={} ({:.2f} MiB)",
+            round_id,
+            filename_,
+            fallback_devices,
+            missing_owner_partitions.size(),
+            sample_stream.str(),
+            fallback_one_way_bytes_total, static_cast<double>(fallback_one_way_bytes_total) / (1024.0 * 1024.0),
+            fallback_one_way_bytes_total, static_cast<double>(fallback_one_way_bytes_total) / (1024.0 * 1024.0));
+    }
 }
 
 void MemPartitionBufferStorage::performNextSwap(int32_t device_idx) {
