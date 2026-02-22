@@ -31,6 +31,20 @@ bool debug_subgraph_enabled() {
     return enabled;
 }
 } // namespace
+namespace {
+bool bucket_identity_map_enabled() {
+    static const bool enabled = []() {
+        const char *env = std::getenv("GEGE_BATCH_ID_MAP");
+        if (env == nullptr) return false;
+        // accept: identity / resident / identity_resident / 2 (whatever you like)
+        std::string s(env);
+        for (auto &c : s) c = std::tolower(c);
+        return (s == "identity" || s == "resident" || s == "identity_resident" || s == "2");
+    }();
+    return enabled;
+}
+} // namespace
+
 
 DataLoader::DataLoader(shared_ptr<GraphModelStorage> graph_storage, LearningTask learning_task, shared_ptr<TrainingConfig> training_config,
                        shared_ptr<EvaluationConfig> evaluation_config, shared_ptr<EncoderConfig> encoder_config, vector<torch::Device> devices,
@@ -842,29 +856,74 @@ void DataLoader::edgeSample(shared_ptr<Batch> batch, int32_t device_idx) {
             dst_neg_mapping = map_to_unsorted.index_select(0, mapped_tensors[3]).reshape(batch->dst_neg_indices_.sizes()) - num_nbrs_sampled;
         }
     } else {
-        // map edges and negatives to their corresponding index in unique_node_indices_
-        auto tup = map_tensors(all_ids);
+        // // map edges and negatives to their corresponding index in unique_node_indices_
+        // auto tup = map_tensors(all_ids);
     
 
-        batch->unique_node_indices_ = std::get<0>(tup);
+        // batch->unique_node_indices_ = std::get<0>(tup);
 
-        if (batch->unique_node_indices_[0].item<int64_t>() == -1) {
-            SPDLOG_ERROR("Node mapping is broken. Try repartition again.");
-            throw std::runtime_error("");
-        }
+        // if (batch->unique_node_indices_[0].item<int64_t>() == -1) {
+        //     SPDLOG_ERROR("Node mapping is broken. Try repartition again.");
+        //     throw std::runtime_error("");
+        // }
 
 
-        mapped_tensors = std::get<1>(tup);
+        // mapped_tensors = std::get<1>(tup);
 
-        src_mapping = mapped_tensors[0];
-        dst_mapping = mapped_tensors[1];
+        // src_mapping = mapped_tensors[0];
+        // dst_mapping = mapped_tensors[1];
 
-        if (batch->src_neg_indices_.defined()) {
-            src_neg_mapping = mapped_tensors[2].reshape(batch->src_neg_indices_.sizes());
-        }
+        // if (batch->src_neg_indices_.defined()) {
+        //     src_neg_mapping = mapped_tensors[2].reshape(batch->src_neg_indices_.sizes());
+        // }
 
-        if (batch->dst_neg_indices_.defined()) {
-            dst_neg_mapping = mapped_tensors[3].reshape(batch->dst_neg_indices_.sizes());
+        // if (batch->dst_neg_indices_.defined()) {
+        //     dst_neg_mapping = mapped_tensors[3].reshape(batch->dst_neg_indices_.sizes());
+        // }
+            if (bucket_identity_map_enabled() && graph_storage_->useInMemorySubGraph()) {
+            // --- NO-SORT identity mapping in resident-local ID space ---
+            auto state = graph_storage_->current_subgraph_states_[device_idx];
+            TORCH_CHECK(state != nullptr && state->in_memory_subgraph_ != nullptr, "Missing in-memory subgraph state");
+            int64_t R = state->in_memory_subgraph_->num_nodes_in_memory_;
+
+            // Edges are already mapped into [0, R) by GraphModelStorage::initializeInMemorySubGraph / updateInMemorySubGraph_.
+            // RNS negatives are sampled from [0, R) as well.
+            auto opts = torch::TensorOptions().dtype(torch::kInt64).device(batch->edges_.device());
+            batch->unique_node_indices_ = torch::arange(R, opts);
+
+            src_mapping = batch->edges_.select(1, 0);
+            dst_mapping = batch->edges_.select(1, -1);
+
+            if (batch->src_neg_indices_.defined()) {
+                src_neg_mapping = batch->src_neg_indices_;
+            }
+            if (batch->dst_neg_indices_.defined()) {
+                dst_neg_mapping = batch->dst_neg_indices_;
+            }
+
+            // Optional debug (disable in production; uses .item() sync):
+            // TORCH_CHECK(src_mapping.min().item<int64_t>() >= 0 && src_mapping.max().item<int64_t>() < R);
+            // TORCH_CHECK(dst_mapping.min().item<int64_t>() >= 0 && dst_mapping.max().item<int64_t>() < R);
+        } else {
+            // --- Original path (sort/unique compaction) ---
+            auto tup = map_tensors(all_ids);
+            batch->unique_node_indices_ = std::get<0>(tup);
+
+            if (batch->unique_node_indices_[0].item<int64_t>() == -1) {
+                SPDLOG_ERROR("Node mapping is broken. Try repartition again.");
+                throw std::runtime_error("");
+            }
+
+            mapped_tensors = std::get<1>(tup);
+            src_mapping = mapped_tensors[0];
+            dst_mapping = mapped_tensors[1];
+
+            if (batch->src_neg_indices_.defined()) {
+                src_neg_mapping = mapped_tensors[2].reshape(batch->src_neg_indices_.sizes());
+            }
+            if (batch->dst_neg_indices_.defined()) {
+                dst_neg_mapping = mapped_tensors[3].reshape(batch->dst_neg_indices_.sizes());
+            }
         }
     }
 
