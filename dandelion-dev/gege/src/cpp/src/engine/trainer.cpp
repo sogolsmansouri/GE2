@@ -2,27 +2,71 @@
 
 #include "configuration/options.h"
 #include "reporting/logger.h"
+
 #include <c10/cuda/CUDACachingAllocator.h>
+
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <sstream>
+#include <thread>
+#include <vector>
+
+#include <nvtx3/nvToolsExt.h>
 
 using std::get;
 using std::tie;
 
 namespace {
+
 bool profile_timing_enabled() {
     static const bool enabled = []() {
         const char *env = std::getenv("GEGE_PROFILE_TIMING");
-        if (env == nullptr) {
-            return false;
-        }
+        if (env == nullptr) return false;
         return !(env[0] == '\0' || (env[0] == '0' && env[1] == '\0'));
     }();
     return enabled;
 }
+
+// NVTX on/off toggle (no overhead when disabled)
+bool nvtx_enabled() {
+    static const bool enabled = []() {
+        const char *env = std::getenv("GEGE_NVTX");
+        if (env == nullptr) return false;
+        return !(env[0] == '\0' || (env[0] == '0' && env[1] == '\0'));
+    }();
+    return enabled;
+}
+
+static inline std::string nvtx_label(const char* prefix, int epoch, int device_idx = -1, int64_t batch_idx = -1) {
+    std::ostringstream os;
+    os << prefix << ":e" << epoch;
+    if (device_idx >= 0) os << ":gpu" << device_idx;
+    if (batch_idx >= 0) os << ":b" << batch_idx;
+    return os.str();
+}
+
+struct NvtxRangeGuard {
+    bool enabled{false};
+    explicit NvtxRangeGuard(const char* msg, bool en) : enabled(en) {
+        if (enabled) nvtxRangePushA(msg);
+    }
+    explicit NvtxRangeGuard(const std::string& msg, bool en) : enabled(en) {
+        if (enabled) nvtxRangePushA(msg.c_str());
+    }
+    ~NvtxRangeGuard() {
+        if (enabled) nvtxRangePop();
+    }
+    NvtxRangeGuard(const NvtxRangeGuard&) = delete;
+    NvtxRangeGuard& operator=(const NvtxRangeGuard&) = delete;
+};
+
 } // namespace
 
+// -----------------------------
+// SynchronousTrainer (single GPU)
+// -----------------------------
 
 SynchronousTrainer::SynchronousTrainer(shared_ptr<DataLoader> dataloader, shared_ptr<Model> model, int logs_per_epoch) {
     dataloader_ = dataloader;
@@ -43,72 +87,83 @@ SynchronousTrainer::SynchronousTrainer(shared_ptr<DataLoader> dataloader, shared
 }
 
 void SynchronousTrainer::train(int num_epochs) {
-
     if (!dataloader_->single_dataset_) {
         dataloader_->setTrainSet();
     }
     dataloader_->initializeBatches(false);
     c10::cuda::CUDACachingAllocator::emptyCache();
-    
+
+    const bool use_nvtx = nvtx_enabled();
+
     Timer timer = Timer(false);
     for (int epoch = 0; epoch < num_epochs; epoch++) {
         timer.start();
-        SPDLOG_INFO("################ Starting training epoch {} ################", dataloader_->getEpochsProcessed() + 1);
+
+        const int epoch_id = dataloader_->getEpochsProcessed() + 1;
+        NvtxRangeGuard epoch_range(nvtx_label("train_epoch", epoch_id), use_nvtx);
+
+        SPDLOG_INFO("################ Starting training epoch {} ################", epoch_id);
+
+        int64_t batch_idx = 0;
         while (dataloader_->hasNextBatch()) {
-            // gets data and parameters for the next batch
-            Timer timer0 = Timer(false);
-            timer0.start();
+            NvtxRangeGuard batch_range(nvtx_label("batch", epoch_id, /*device_idx=*/-1, batch_idx), use_nvtx);
+            batch_idx++;
 
+            NvtxRangeGuard get_batch_range("getBatch", use_nvtx);
             shared_ptr<Batch> batch = dataloader_->getBatch();
+            // get_batch_range ends here (scope)
 
-            if (dataloader_->graph_storage_->embeddingsOffDevice()) {
-                batch->to(model_->device_);
-            } else {
-                dataloader_->loadGPUParameters(batch);
+            {
+                NvtxRangeGuard load_range("load_gpu_params_or_to", use_nvtx);
+                if (dataloader_->graph_storage_->embeddingsOffDevice()) {
+                    batch->to(model_->device_);
+                } else {
+                    dataloader_->loadGPUParameters(batch);
+                }
             }
 
             if (batch->node_embeddings_.defined()) {
                 batch->node_embeddings_.requires_grad_();
             }
 
-            batch->dense_graph_.performMap();
-
-            model_->train_batch(batch);
-
-
-            
-            if (batch->node_embeddings_.defined()) {
-                if (dataloader_->graph_storage_->embeddingsOffDevice()) {
-                    batch->embeddingsToHost();
-                } else {
-                    dataloader_->updateEmbeddings(batch, true);
-                }
-                dataloader_->updateEmbeddings(batch, false);        
+            {
+                NvtxRangeGuard train_range("train_batch", use_nvtx);
+                batch->dense_graph_.performMap();
+                model_->train_batch(batch);
             }
 
-            if (batch->node_embeddings_g_.defined()) {
-                if (dataloader_->graph_storage_->embeddingsOffDeviceG()) {
-                    batch->embeddingsToHostG();
-                } else {
-                    dataloader_->updateEmbeddingsG(batch, true);
+            {
+                NvtxRangeGuard upd_range("update_embeddings", use_nvtx);
+
+                if (batch->node_embeddings_.defined()) {
+                    if (dataloader_->graph_storage_->embeddingsOffDevice()) {
+                        batch->embeddingsToHost();
+                    } else {
+                        dataloader_->updateEmbeddings(batch, true);
+                    }
+                    dataloader_->updateEmbeddings(batch, false);
                 }
-                dataloader_->updateEmbeddingsG(batch, false);        
+
+                if (batch->node_embeddings_g_.defined()) {
+                    if (dataloader_->graph_storage_->embeddingsOffDeviceG()) {
+                        batch->embeddingsToHostG();
+                    } else {
+                        dataloader_->updateEmbeddingsG(batch, true);
+                    }
+                    dataloader_->updateEmbeddingsG(batch, false);
+                }
             }
 
             batch->clear();
-            // notify that the batch has been completed
             dataloader_->finishedBatch();
-
-            // log progress
             progress_reporter_->addResult(batch->batch_size_);
-
         }
-        SPDLOG_INFO("################ Finished training epoch {} ################", dataloader_->getEpochsProcessed() + 1);
+
+        SPDLOG_INFO("################ Finished training epoch {} ################", epoch_id);
         timer.stop();
 
-        dataloader_->graph_storage_->logEpochCommunicationStatsAndReset(dataloader_->getEpochsProcessed() + 1);
-        
-        // notify that the epoch has been completed
+        dataloader_->graph_storage_->logEpochCommunicationStatsAndReset(epoch_id);
+
         dataloader_->nextEpoch();
         progress_reporter_->clear();
 
@@ -126,10 +181,12 @@ void SynchronousTrainer::train(int num_epochs) {
         float items_per_second = (float)num_items / ((float)epoch_time / 1000);
         SPDLOG_INFO("Epoch Runtime: {}ms", epoch_time);
         SPDLOG_INFO("{} per Second: {}", item_name, items_per_second);
-
     }
 }
 
+// ---------------------------------
+// SynchronousMultiGPUTrainer (multi)
+// ---------------------------------
 
 SynchronousMultiGPUTrainer::SynchronousMultiGPUTrainer(shared_ptr<DataLoader> dataloader, shared_ptr<Model> model, int logs_per_epoch) {
     dataloader_ = dataloader;
@@ -149,28 +206,33 @@ SynchronousMultiGPUTrainer::SynchronousMultiGPUTrainer(shared_ptr<DataLoader> da
     progress_reporter_ = std::make_shared<ProgressReporter>(item_name, num_items, logs_per_epoch);
 }
 
-
-
 void SynchronousMultiGPUTrainer::train(int num_epochs) {
     if (!dataloader_->single_dataset_) {
-	    dataloader_->setTrainSet();
+        dataloader_->setTrainSet();
     }
 
-    dataloader_->activate_devices_ = model_->device_models_.size();
+    dataloader_->activate_devices_ = (int)model_->device_models_.size();
 
-    for (int i = 0; i < model_->device_models_.size(); i ++) {
+    for (int i = 0; i < (int)model_->device_models_.size(); i++) {
         dataloader_->initializeBatches(false, i);
     }
+
     c10::cuda::CUDACachingAllocator::emptyCache();
 
-    Timer timer = Timer(false); 
+    const bool use_nvtx = nvtx_enabled();
+
+    Timer timer = Timer(false);
 
     std::atomic<int64_t> need_sync = 0;
     std::atomic<int64_t> sync_generation = 0;
-    
+
     for (int epoch = 0; epoch < num_epochs; epoch++) {
         timer.start();
+
+        const int epoch_id = dataloader_->getEpochsProcessed() + 1;
+
         std::vector<std::thread> threads;
+
         std::vector<int64_t> batches_processed(model_->device_models_.size(), 0);
         std::vector<int64_t> get_batch_ms(model_->device_models_.size(), 0);
         std::vector<int64_t> load_gpu_params_ms(model_->device_models_.size(), 0);
@@ -179,20 +241,41 @@ void SynchronousMultiGPUTrainer::train(int num_epochs) {
         std::vector<int64_t> sync_wait_ms(model_->device_models_.size(), 0);
         std::vector<int64_t> finish_batch_ms(model_->device_models_.size(), 0);
 
-        SPDLOG_INFO("################ Starting training epoch {} ################", dataloader_->getEpochsProcessed() + 1);
-        for (int32_t device_idx = 0; device_idx < model_->device_models_.size(); device_idx ++) {
-            threads.emplace_back(std::thread([this, &need_sync, &sync_generation, &batches_processed, &get_batch_ms, &load_gpu_params_ms,
-                                              &train_batch_ms, &update_embeddings_ms, &sync_wait_ms, &finish_batch_ms, device_idx] {
+        SPDLOG_INFO("################ Starting training epoch {} ################", epoch_id);
+
+        for (int32_t device_idx = 0; device_idx < (int32_t)model_->device_models_.size(); device_idx++) {
+            threads.emplace_back(std::thread([this, &need_sync, &sync_generation,
+                                              &batches_processed, &get_batch_ms, &load_gpu_params_ms,
+                                              &train_batch_ms, &update_embeddings_ms, &sync_wait_ms, &finish_batch_ms,
+                                              device_idx, epoch_id, use_nvtx] {
+
+                // Per-device epoch range (nice in Nsight)
+                NvtxRangeGuard epoch_range(nvtx_label("train_epoch", epoch_id, device_idx), use_nvtx);
+
+                int64_t local_batch_idx = 0;
+
                 while (dataloader_->hasNextBatch(device_idx)) {
+                    NvtxRangeGuard batch_range(nvtx_label("batch", epoch_id, device_idx, local_batch_idx), use_nvtx);
+                    local_batch_idx++;
+
                     // gets data and parameters for the next batch
                     auto t_get_batch_start = std::chrono::steady_clock::now();
-                    shared_ptr<Batch> batch = dataloader_->getBatch(c10::nullopt, false, device_idx);
+                    shared_ptr<Batch> batch;
+                    {
+                        NvtxRangeGuard r("getBatch", use_nvtx);
+                        batch = dataloader_->getBatch(c10::nullopt, false, device_idx);
+                    }
                     auto t_get_batch_end = std::chrono::steady_clock::now();
                     get_batch_ms[device_idx] +=
                         std::chrono::duration_cast<std::chrono::milliseconds>(t_get_batch_end - t_get_batch_start).count();
+
                     bool has_relation = (batch->edges_.size(1) == 3);
+
                     auto t_load_gpu_start = std::chrono::steady_clock::now();
-                    dataloader_->loadGPUParameters(batch, device_idx);
+                    {
+                        NvtxRangeGuard r("loadGPUParameters", use_nvtx);
+                        dataloader_->loadGPUParameters(batch, device_idx);
+                    }
                     auto t_load_gpu_end = std::chrono::steady_clock::now();
                     load_gpu_params_ms[device_idx] +=
                         std::chrono::duration_cast<std::chrono::milliseconds>(t_load_gpu_end - t_load_gpu_start).count();
@@ -204,51 +287,43 @@ void SynchronousMultiGPUTrainer::train(int num_epochs) {
                     batch->dense_graph_.performMap();
 
                     auto t_train_batch_start = std::chrono::steady_clock::now();
-                    model_->device_models_[device_idx]->train_batch(batch, false);
+                    {
+                        NvtxRangeGuard r("train_batch", use_nvtx);
+                        model_->device_models_[device_idx]->train_batch(batch, false);
+                    }
                     auto t_train_batch_end = std::chrono::steady_clock::now();
                     train_batch_ms[device_idx] +=
                         std::chrono::duration_cast<std::chrono::milliseconds>(t_train_batch_end - t_train_batch_start).count();
 
                     auto t_update_embeddings_start = std::chrono::steady_clock::now();
-                    if (batch->node_embeddings_.defined()) {
-                        if (dataloader_->graph_storage_->embeddingsOffDevice()) {
-                            batch->embeddingsToHost();
-                        } else {
-                            dataloader_->updateEmbeddings(batch, true, device_idx);
-                        }
-                        dataloader_->updateEmbeddings(batch, false, device_idx);
-                    }
+                    {
+                        NvtxRangeGuard r("update_embeddings", use_nvtx);
 
-                    if (batch->node_embeddings_g_.defined()) {
-                        if (dataloader_->graph_storage_->embeddingsOffDeviceG()) {
-                            batch->embeddingsToHostG();
-                        } else {
-                            dataloader_->updateEmbeddingsG(batch, true, device_idx);
+                        if (batch->node_embeddings_.defined()) {
+                            if (dataloader_->graph_storage_->embeddingsOffDevice()) {
+                                batch->embeddingsToHost();
+                            } else {
+                                dataloader_->updateEmbeddings(batch, true, device_idx);
+                            }
+                            dataloader_->updateEmbeddings(batch, false, device_idx);
                         }
-                        dataloader_->updateEmbeddingsG(batch, false, device_idx);
+
+                        if (batch->node_embeddings_g_.defined()) {
+                            if (dataloader_->graph_storage_->embeddingsOffDeviceG()) {
+                                batch->embeddingsToHostG();
+                            } else {
+                                dataloader_->updateEmbeddingsG(batch, true, device_idx);
+                            }
+                            dataloader_->updateEmbeddingsG(batch, false, device_idx);
+                        }
                     }
                     auto t_update_embeddings_end = std::chrono::steady_clock::now();
                     update_embeddings_ms[device_idx] +=
                         std::chrono::duration_cast<std::chrono::milliseconds>(t_update_embeddings_end - t_update_embeddings_start).count();
 
-
-                    // if(has_relation) {
-                    //     if (dataloader_->batches_left_[device_idx] == 1) {
-                    //         sync_finished = false;
-                    //         need_sync ++;
-
-                    //         if (need_sync == dataloader_->activate_devices_) {
-                    //             model_->all_reduce_rel();
-                    //             sync_finished = true;
-                    //             need_sync = 0;
-                    //         }
-                    //         while (!sync_finished) {
-                    //             std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                    //         }
-                    //     }
-                    // }
-
                     if (has_relation) {
+                        NvtxRangeGuard r("sync_all_reduce", use_nvtx);
+
                         auto t_sync_start = std::chrono::steady_clock::now();
                         int64_t observed_generation = sync_generation.load();
                         int64_t arrivals = need_sync.fetch_add(1) + 1;
@@ -266,27 +341,30 @@ void SynchronousMultiGPUTrainer::train(int num_epochs) {
                         sync_wait_ms[device_idx] +=
                             std::chrono::duration_cast<std::chrono::milliseconds>(t_sync_end - t_sync_start).count();
                     }
-                    
+
                     batch->clear();
+
                     // notify that the batch has been completed
                     auto t_finish_batch_start = std::chrono::steady_clock::now();
-                    dataloader_->finishedBatch(device_idx);
+                    {
+                        NvtxRangeGuard r("finishedBatch", use_nvtx);
+                        dataloader_->finishedBatch(device_idx);
+                    }
                     auto t_finish_batch_end = std::chrono::steady_clock::now();
                     finish_batch_ms[device_idx] +=
                         std::chrono::duration_cast<std::chrono::milliseconds>(t_finish_batch_end - t_finish_batch_start).count();
+
                     batches_processed[device_idx]++;
-                 }
+                }
             }));
         }
-        for(auto &thread : threads){ thread.join(); }
-        // if (model_->device_models_.size() > 1)
-        //     model_->all_reduce();
 
-        SPDLOG_INFO("################ Finished training epoch {} ################", dataloader_->getEpochsProcessed() + 1);
+        for (auto &thread : threads) thread.join();
+
+        SPDLOG_INFO("################ Finished training epoch {} ################", epoch_id);
         timer.stop();
 
-        dataloader_->graph_storage_->logEpochCommunicationStatsAndReset(dataloader_->getEpochsProcessed() + 1);
-        // notify that the epoch has been completed
+        dataloader_->graph_storage_->logEpochCommunicationStatsAndReset(epoch_id);
         dataloader_->nextEpoch();
         progress_reporter_->clear();
 
@@ -314,7 +392,7 @@ void SynchronousMultiGPUTrainer::train(int num_epochs) {
             int64_t total_sync_wait_ms = 0;
             int64_t total_finish_batch_ms = 0;
 
-            for (int32_t device_idx = 0; device_idx < model_->device_models_.size(); device_idx++) {
+            for (int32_t device_idx = 0; device_idx < (int32_t)model_->device_models_.size(); device_idx++) {
                 total_batches += batches_processed[device_idx];
                 total_get_batch_ms += get_batch_ms[device_idx];
                 total_load_gpu_params_ms += load_gpu_params_ms[device_idx];
