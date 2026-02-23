@@ -441,7 +441,9 @@ void MemPartitionBufferStorage::performNextSwapP2P_() {
 
     std::vector<torch::Tensor> next_gpu_views(num_devices);
     for (int device_idx = 0; device_idx < num_devices; device_idx++) {
-        next_gpu_views[device_idx] = torch::empty_like(buffers_[device_idx]->buffer_tensor_gpu_view_);
+        // Use zero-init so partially filled slots (e.g., tail of the last partition)
+        // never carry uninitialized bytes into training.
+        next_gpu_views[device_idx] = torch::zeros_like(buffers_[device_idx]->buffer_tensor_gpu_view_);
     }
 
     int transfer_ops = 0;
@@ -483,6 +485,12 @@ void MemPartitionBufferStorage::performNextSwapP2P_() {
                 char *src_base = static_cast<char *>(buffers_[src_idx]->buffer_tensor_gpu_view_.data_ptr());
                 int64_t src_slot_bytes = buffers_[src_idx]->getSlotBytes();
                 int64_t copy_bytes = buffers_[src_idx]->getPartitionBytes(part_id);
+                if (copy_bytes > src_slot_bytes || copy_bytes > dst_slot_bytes) {
+                    SPDLOG_ERROR(
+                        "P2P copy size overflow for partition p{}: copy_bytes={} src_slot_bytes={} dst_slot_bytes={} src_device={} dst_device={}",
+                        part_id, copy_bytes, src_slot_bytes, dst_slot_bytes, src_device, dst_device);
+                    throw std::runtime_error("");
+                }
 
                 char *dst_ptr = dst_base + dst_slot * dst_slot_bytes;
                 char *src_ptr = src_base + src_slot * src_slot_bytes;
