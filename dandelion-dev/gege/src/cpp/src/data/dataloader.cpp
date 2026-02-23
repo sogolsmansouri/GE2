@@ -30,6 +30,17 @@ bool debug_subgraph_enabled() {
     }();
     return enabled;
 }
+
+bool active_edge_shuffle_enabled() {
+    static const bool enabled = []() {
+        const char *env = std::getenv("GEGE_ACTIVE_EDGE_SHUFFLE");
+        if (env == nullptr) {
+            return true;
+        }
+        return !(env[0] == '\0' || (env[0] == '0' && env[1] == '\0'));
+    }();
+    return enabled;
+}
 } // namespace
 namespace {
 bool bucket_identity_map_enabled() {
@@ -270,11 +281,13 @@ void DataLoader::setActiveEdges(int32_t device_idx) {
         }
     }
 
-    auto opts = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
-    auto perm = torch::randperm(active_edges.size(0), opts);
-    perm = perm.to(active_edges.device());
-    active_edges = (active_edges.index_select(0, perm));
-    perm = torch::Tensor();
+    if (active_edge_shuffle_enabled()) {
+        auto opts = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
+        auto perm = torch::randperm(active_edges.size(0), opts);
+        perm = perm.to(active_edges.device());
+        active_edges = (active_edges.index_select(0, perm));
+        perm = torch::Tensor();
+    }
     graph_storage_->setActiveEdges(active_edges, device_idx);
 
     if (profile_timing_enabled()) {
