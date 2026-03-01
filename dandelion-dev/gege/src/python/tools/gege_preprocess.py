@@ -3,23 +3,28 @@ import shutil
 from pathlib import Path
 
 from gege.tools.preprocess import custom
-from gege.tools.preprocess.datasets import (
-    fb15k,
-    fb15k_237,
-    freebase86m,
-    friendster,
-    livejournal,
-    ogb_mag240m,
-    ogb_wikikg90mv2,
-    ogbl_citation2,
-    ogbl_ppa,
-    ogbl_wikikg2,
-    ogbn_arxiv,
-    ogbn_papers100m,
-    ogbn_products,
-    twitter,
-    wikidata5m,
-)
+
+try:
+    from gege.tools.preprocess.datasets import (
+        fb15k,
+        fb15k_237,
+        freebase86m,
+        friendster,
+        livejournal,
+        ogb_mag240m,
+        ogb_wikikg90mv2,
+        ogbl_citation2,
+        ogbl_ppa,
+        ogbl_wikikg2,
+        ogbn_arxiv,
+        ogbn_papers100m,
+        ogbn_products,
+        twitter,
+        wikidata5m,
+    )
+    BUILTIN_DATASETS_AVAILABLE = True
+except ModuleNotFoundError:
+    BUILTIN_DATASETS_AVAILABLE = False
 
 
 def set_args():
@@ -115,23 +120,25 @@ def main():
     if args.overwrite and Path(args.output_directory).exists():
         shutil.rmtree(args.output_directory)
 
-    dataset_dict = {
-        "FB15K": fb15k.FB15K,
-        "FB15K_237": fb15k_237.FB15K237,
-        "LIVEJOURNAL": livejournal.Livejournal,
-        "FRIENDSTER": friendster.Friendster,
-        "TWITTER": twitter.Twitter,
-        "FREEBASE86M": freebase86m.Freebase86m,
-        "OGBL_WIKIKG2": ogbl_wikikg2.OGBLWikiKG2,
-        "OGBL_CITATION2": ogbl_citation2.OGBLCitation2,
-        "OGBL_PPA": ogbl_ppa.OGBLPpa,
-        "OGBN_ARXIV": ogbn_arxiv.OGBNArxiv,
-        "OGBN_PRODUCTS": ogbn_products.OGBNProducts,
-        "OGBN_PAPERS100M": ogbn_papers100m.OGBNPapers100M,
-        "OGB_WIKIKG90MV2": ogb_wikikg90mv2.OGBWikiKG90Mv2,
-        "OGB_MAG240M": ogb_mag240m.OGBMag240M,
-        "WIKIDATA5M": wikidata5m.Wikidata5m,
-    }
+    dataset_dict = {}
+    if BUILTIN_DATASETS_AVAILABLE:
+        dataset_dict = {
+            "FB15K": fb15k.FB15K,
+            "FB15K_237": fb15k_237.FB15K237,
+            "LIVEJOURNAL": livejournal.Livejournal,
+            "FRIENDSTER": friendster.Friendster,
+            "TWITTER": twitter.Twitter,
+            "FREEBASE86M": freebase86m.Freebase86m,
+            "OGBL_WIKIKG2": ogbl_wikikg2.OGBLWikiKG2,
+            "OGBL_CITATION2": ogbl_citation2.OGBLCitation2,
+            "OGBL_PPA": ogbl_ppa.OGBLPpa,
+            "OGBN_ARXIV": ogbn_arxiv.OGBNArxiv,
+            "OGBN_PRODUCTS": ogbn_products.OGBNProducts,
+            "OGBN_PAPERS100M": ogbn_papers100m.OGBNPapers100M,
+            "OGB_WIKIKG90MV2": ogb_wikikg90mv2.OGBWikiKG90Mv2,
+            "OGB_MAG240M": ogb_mag240m.OGBMag240M,
+            "WIKIDATA5M": wikidata5m.Wikidata5m,
+        }
 
     dataset = dataset_dict.get(args.dataset.upper())
     if dataset is not None:
@@ -145,6 +152,12 @@ def main():
             partitioned_eval=args.partitioned_eval,
         )
     else:
+        if args.dataset.lower() != "custom" and not BUILTIN_DATASETS_AVAILABLE:
+            raise ModuleNotFoundError(
+                "Built-in dataset downloaders are not available in this checkout. "
+                "Use --dataset custom with --edges <train> <valid> <test>."
+            )
+
         print("Preprocess custom dataset")
 
         # custom link prediction dataset

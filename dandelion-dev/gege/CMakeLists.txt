@@ -86,15 +86,15 @@ find_package(Python3 COMPONENTS Development Interpreter REQUIRED)
 find_package(Torch REQUIRED)
 
 execute_process(
-        COMMAND python3 -c "import torch; print(torch._C._PYBIND11_COMPILER_TYPE, end='')"
+        COMMAND python3 -c "import torch; print(getattr(torch._C, '_PYBIND11_COMPILER_TYPE', ''), end='')"
         OUTPUT_VARIABLE _PYBIND11_COMPILER_TYPE
 )
 execute_process(
-        COMMAND python3 -c "import torch; print(torch._C._PYBIND11_STDLIB, end='')"
+        COMMAND python3 -c "import torch; print(getattr(torch._C, '_PYBIND11_STDLIB', ''), end='')"
         OUTPUT_VARIABLE _PYBIND11_STDLIB
 )
 execute_process(
-        COMMAND python3 -c "import torch; print(torch._C._PYBIND11_BUILD_ABI, end='')"
+        COMMAND python3 -c "import torch; print(getattr(torch._C, '_PYBIND11_BUILD_ABI', ''), end='')"
         OUTPUT_VARIABLE _PYBIND11_BUILD_ABI
 )
 
@@ -102,7 +102,19 @@ message(STATUS "PYBIND11_COMPILER_TYPE:" ${_PYBIND11_COMPILER_TYPE})
 message(STATUS "PYBIND11_STDLIB:" ${_PYBIND11_STDLIB})
 message(STATUS "PYBIND11_BUILD_ABI:" ${_PYBIND11_BUILD_ABI})
 
-add_compile_definitions(PYBIND11_COMPILER_TYPE="${_PYBIND11_COMPILER_TYPE}" PYBIND11_STDLIB="${_PYBIND11_STDLIB}" PYBIND11_BUILD_ABI="${_PYBIND11_BUILD_ABI}")
+set(PYBIND11_TORCH_ABI_DEFINITIONS "")
+if(NOT "${_PYBIND11_COMPILER_TYPE}" STREQUAL "")
+    list(APPEND PYBIND11_TORCH_ABI_DEFINITIONS PYBIND11_COMPILER_TYPE="${_PYBIND11_COMPILER_TYPE}")
+endif()
+if(NOT "${_PYBIND11_STDLIB}" STREQUAL "")
+    list(APPEND PYBIND11_TORCH_ABI_DEFINITIONS PYBIND11_STDLIB="${_PYBIND11_STDLIB}")
+endif()
+if(NOT "${_PYBIND11_BUILD_ABI}" STREQUAL "")
+    list(APPEND PYBIND11_TORCH_ABI_DEFINITIONS PYBIND11_BUILD_ABI="${_PYBIND11_BUILD_ABI}")
+endif()
+if(PYBIND11_TORCH_ABI_DEFINITIONS)
+    add_compile_definitions(${PYBIND11_TORCH_ABI_DEFINITIONS})
+endif()
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 message(STATUS "CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")

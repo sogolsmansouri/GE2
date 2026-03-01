@@ -38,7 +38,7 @@ training:
     negatives_per_positive: 1000
     degree_fraction: 0.0
     filtered: false
-  num_epochs: 2
+  num_epochs: 4
   epochs_per_shuffle: 1
 evaluation:
   batch_size: 1000

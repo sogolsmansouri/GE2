@@ -3,6 +3,7 @@
 #include "configuration/options.h"
 #include "reporting/logger.h"
 #include <c10/cuda/CUDACachingAllocator.h>
+#include <nvtx3/nvtx3.hpp>
 
 using std::get;
 using std::tie;
@@ -33,11 +34,14 @@ void SynchronousTrainer::train(int num_epochs) {
     }
     dataloader_->initializeBatches(false);
     c10::cuda::CUDACachingAllocator::emptyCache();
-    
+
     Timer timer = Timer(false);
     for (int epoch = 0; epoch < num_epochs; epoch++) {
         timer.start();
-        SPDLOG_INFO("################ Starting training epoch {} ################", dataloader_->getEpochsProcessed() + 1);
+        auto epoch_number = dataloader_->getEpochsProcessed() + 1;
+        std::string epoch_range_name = "train_epoch_" + std::to_string(epoch_number);
+        nvtx3::scoped_range epoch_range{epoch_range_name.c_str()};
+        SPDLOG_INFO("################ Starting training epoch {} ################", epoch_number);
         while (dataloader_->hasNextBatch()) {
             // gets data and parameters for the next batch
             Timer timer0 = Timer(false);
@@ -153,7 +157,10 @@ void SynchronousMultiGPUTrainer::train(int num_epochs) {
         timer.start();
         std::vector<std::thread> threads;
 
-        SPDLOG_INFO("################ Starting training epoch {} ################", dataloader_->getEpochsProcessed() + 1);
+        auto epoch_number = dataloader_->getEpochsProcessed() + 1;
+        std::string epoch_range_name = "train_epoch_" + std::to_string(epoch_number);
+        nvtx3::scoped_range epoch_range{epoch_range_name.c_str()};
+        SPDLOG_INFO("################ Starting training epoch {} ################", epoch_number);
         for (int32_t device_idx = 0; device_idx < model_->device_models_.size(); device_idx ++) {
             threads.emplace_back(std::thread([this, &need_sync, &sync_finished, device_idx] {
                 while (dataloader_->hasNextBatch(device_idx)) {

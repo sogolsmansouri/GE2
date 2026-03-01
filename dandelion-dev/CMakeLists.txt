@@ -27,7 +27,7 @@ add_custom_target(pip-install
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/gege/src/python ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
     COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/README.md ${PACKAGE_OUTPUT_DIRECTORY}/README.md
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/package/ ${PACKAGE_OUTPUT_DIRECTORY}
-    COMMAND ${Python3_EXECUTABLE} -m pip install .
+    COMMAND ${Python3_EXECUTABLE} -m pip install --no-build-isolation --no-deps .
     WORKING_DIRECTORY ${PACKAGE_OUTPUT_DIRECTORY}
     DEPENDS gege
 )
