@@ -1,5 +1,7 @@
 #include "nn/loss.h"
 
+#include "common/nvtx_range.h"
+
 void check_score_shapes(torch::Tensor pos_scores, torch::Tensor neg_scores) {
     if (!pos_scores.defined()) {
         throw UndefinedTensorException();
@@ -44,6 +46,8 @@ std::tuple<torch::Tensor, torch::Tensor> scores_to_labels(torch::Tensor pos_scor
 }
 
 torch::Tensor SoftmaxCrossEntropy::operator()(torch::Tensor y_pred, torch::Tensor labels, bool scores) {
+    nvtx3::scoped_range range{"loss.softmax_cross_entropy"};
+
     if (!scores) {
         throw GegeRuntimeException(
             "Input to SoftmaxCrossEntropy loss function must be scores. SoftmaxCrossEntropy is currently unsupported for classification.");
@@ -63,6 +67,8 @@ torch::Tensor SoftmaxCrossEntropy::operator()(torch::Tensor y_pred, torch::Tenso
 }
 
 torch::Tensor RankingLoss::operator()(torch::Tensor pos_scores, torch::Tensor neg_scores, bool scores) {
+    nvtx3::scoped_range range{"loss.ranking"};
+
     // does this loss make sense?
 
     if (!scores) {
@@ -82,6 +88,8 @@ torch::Tensor RankingLoss::operator()(torch::Tensor pos_scores, torch::Tensor ne
 }
 
 torch::Tensor CrossEntropyLoss::operator()(torch::Tensor y_pred, torch::Tensor labels, bool scores) {
+    nvtx3::scoped_range range{"loss.cross_entropy"};
+
     if (scores) {
         check_score_shapes(y_pred, labels);
         std::tie(y_pred, labels) = scores_to_labels(y_pred.unsqueeze(1), labels, false);
@@ -98,6 +106,8 @@ torch::Tensor CrossEntropyLoss::operator()(torch::Tensor y_pred, torch::Tensor l
 }
 
 torch::Tensor BCEAfterSigmoidLoss::operator()(torch::Tensor y_pred, torch::Tensor labels, bool scores) {
+    nvtx3::scoped_range range{"loss.bce_after_sigmoid"};
+
     if (scores) {
         check_score_shapes(y_pred, labels);
         std::tie(y_pred, labels) = scores_to_labels(y_pred, labels.flatten(0, 1), true);
@@ -116,6 +126,8 @@ torch::Tensor BCEAfterSigmoidLoss::operator()(torch::Tensor y_pred, torch::Tenso
 }
 
 torch::Tensor BCEWithLogitsLoss::operator()(torch::Tensor y_pred, torch::Tensor labels, bool scores) {
+    nvtx3::scoped_range range{"loss.bce_with_logits"};
+
     if (scores) {
         check_score_shapes(y_pred, labels);
         std::tie(y_pred, labels) = scores_to_labels(y_pred, labels.flatten(0, 1), true);
@@ -134,6 +146,8 @@ torch::Tensor BCEWithLogitsLoss::operator()(torch::Tensor y_pred, torch::Tensor 
 }
 
 torch::Tensor MSELoss::operator()(torch::Tensor y_pred, torch::Tensor labels, bool scores) {
+    nvtx3::scoped_range range{"loss.mse"};
+
     if (scores) {
         check_score_shapes(y_pred, labels);
         std::tie(y_pred, labels) = scores_to_labels(y_pred, labels.flatten(0, 1), true);
@@ -152,6 +166,8 @@ torch::Tensor MSELoss::operator()(torch::Tensor y_pred, torch::Tensor labels, bo
 }
 
 torch::Tensor SoftPlusLoss::operator()(torch::Tensor y_pred, torch::Tensor labels, bool scores) {
+    nvtx3::scoped_range range{"loss.softplus"};
+
     if (scores) {
         check_score_shapes(y_pred, labels);
         std::tie(y_pred, labels) = scores_to_labels(y_pred, labels.flatten(0, 1), true);

@@ -1,5 +1,6 @@
 #include "data/batch.h"
 
+#include "common/runtime_profile.h"
 #include "configuration/constants.h"
 #include "reporting/logger.h"
 
@@ -14,6 +15,7 @@ Batch::Batch(bool train) : device_transfer_(0), host_transfer_(0), timer_(false)
 Batch::~Batch() { clear(); }
 
 void Batch::to(torch::Device device) {
+    runtime_profile::ScopedTimer timer(runtime_profile::batch_to_device_ns, runtime_profile::batch_to_device_calls);
     device_id_ = device.index();
 
     if (device.is_cuda()) {
@@ -125,6 +127,7 @@ void Batch::accumulateGradientsG(float learning_rate) {
 }
 
 void Batch::embeddingsToHost() {
+    runtime_profile::ScopedTimer timer(runtime_profile::batch_to_host_ns, runtime_profile::batch_to_host_calls);
     if (node_gradients_.defined() && node_gradients_.device().is_cuda()) {
         auto grad_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(true);
         Gradients temp_grads = torch::empty(node_gradients_.sizes(), grad_opts);
@@ -148,6 +151,7 @@ void Batch::embeddingsToHost() {
 }
 
 void Batch::embeddingsToHostG() {
+    runtime_profile::ScopedTimer timer(runtime_profile::batch_to_host_ns, runtime_profile::batch_to_host_calls);
     if (node_gradients_g_.defined() && node_gradients_g_.device().is_cuda()) {
         auto grad_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(true);
         Gradients temp_grads = torch::empty(node_gradients_g_.sizes(), grad_opts);

@@ -1,12 +1,78 @@
 #include "engine/trainer.h"
 
 #include "configuration/options.h"
+#include "common/nvtx_range.h"
+#include "common/runtime_profile.h"
 #include "reporting/logger.h"
 #include <c10/cuda/CUDACachingAllocator.h>
-#include <nvtx3/nvtx3.hpp>
 
 using std::get;
 using std::tie;
+
+namespace {
+
+double ns_to_ms(int64_t ns) { return static_cast<double>(ns) / 1.0e6; }
+
+double avg_ns_to_us(int64_t ns, int64_t calls) {
+    if (calls <= 0) {
+        return 0.0;
+    }
+    return static_cast<double>(ns) / static_cast<double>(calls) / 1.0e3;
+}
+
+void log_runtime_profile_epoch(int64_t epoch_number) {
+    auto snap = runtime_profile::captureAndReset();
+    if (snap.empty()) {
+        return;
+    }
+
+    SPDLOG_INFO(
+        "[runtime-prof][epoch {}] loadGPUParameters {:.2f} ms ({} calls, {:.2f} us/call), "
+        "getNodeEmbeddings {:.2f} ms ({} calls, {:.2f} us/call), "
+        "getNodeState {:.2f} ms ({} calls, {:.2f} us/call)",
+        epoch_number,
+        ns_to_ms(snap.load_gpu_params_ns),
+        snap.load_gpu_params_calls,
+        avg_ns_to_us(snap.load_gpu_params_ns, snap.load_gpu_params_calls),
+        ns_to_ms(snap.storage_get_embeddings_ns),
+        snap.storage_get_embeddings_calls,
+        avg_ns_to_us(snap.storage_get_embeddings_ns, snap.storage_get_embeddings_calls),
+        ns_to_ms(snap.storage_get_state_ns),
+        snap.storage_get_state_calls,
+        avg_ns_to_us(snap.storage_get_state_ns, snap.storage_get_state_calls));
+
+    SPDLOG_INFO(
+        "[runtime-prof][epoch {}] buffer.indexRead {:.2f} ms ({} calls, {:.2f} us/call), "
+        "buffer.indexAdd {:.2f} ms ({} calls, {:.2f} us/call), "
+        "updateEmbeddings(gpu) {:.2f} ms ({} calls, {:.2f} us/call), "
+        "updateEmbeddings(host) {:.2f} ms ({} calls, {:.2f} us/call)",
+        epoch_number,
+        ns_to_ms(snap.buffer_index_read_ns),
+        snap.buffer_index_read_calls,
+        avg_ns_to_us(snap.buffer_index_read_ns, snap.buffer_index_read_calls),
+        ns_to_ms(snap.buffer_index_add_ns),
+        snap.buffer_index_add_calls,
+        avg_ns_to_us(snap.buffer_index_add_ns, snap.buffer_index_add_calls),
+        ns_to_ms(snap.update_embeddings_gpu_ns),
+        snap.update_embeddings_gpu_calls,
+        avg_ns_to_us(snap.update_embeddings_gpu_ns, snap.update_embeddings_gpu_calls),
+        ns_to_ms(snap.update_embeddings_host_ns),
+        snap.update_embeddings_host_calls,
+        avg_ns_to_us(snap.update_embeddings_host_ns, snap.update_embeddings_host_calls));
+
+    SPDLOG_INFO(
+        "[runtime-prof][epoch {}] Batch::to {:.2f} ms ({} calls, {:.2f} us/call), "
+        "Batch::embeddingsToHost {:.2f} ms ({} calls, {:.2f} us/call)",
+        epoch_number,
+        ns_to_ms(snap.batch_to_device_ns),
+        snap.batch_to_device_calls,
+        avg_ns_to_us(snap.batch_to_device_ns, snap.batch_to_device_calls),
+        ns_to_ms(snap.batch_to_host_ns),
+        snap.batch_to_host_calls,
+        avg_ns_to_us(snap.batch_to_host_ns, snap.batch_to_host_calls));
+}
+
+} // namespace
 
 
 SynchronousTrainer::SynchronousTrainer(shared_ptr<DataLoader> dataloader, shared_ptr<Model> model, int logs_per_epoch) {
@@ -112,6 +178,7 @@ void SynchronousTrainer::train(int num_epochs) {
         float items_per_second = (float)num_items / ((float)epoch_time / 1000);
         SPDLOG_INFO("Epoch Runtime: {}ms", epoch_time);
         SPDLOG_INFO("{} per Second: {}", item_name, items_per_second);
+        log_runtime_profile_epoch(epoch_number);
     }
 }
 
@@ -260,5 +327,6 @@ void SynchronousMultiGPUTrainer::train(int num_epochs) {
         float items_per_second = (float)num_items / ((float)epoch_time / 1000);
         SPDLOG_INFO("Epoch Runtime: {}ms", epoch_time);
         SPDLOG_INFO("{} per Second: {}", item_name, items_per_second);
+        log_runtime_profile_epoch(epoch_number);
     }
 }

@@ -5,6 +5,7 @@
 #include <c10/cuda/CUDAStream.h>
 #include <ATen/cuda/CUDAEvent.h>
 
+#include "common/runtime_profile.h"
 #include "configuration/util.h"
 #include "data/ordering.h"
 #include "reporting/logger.h"
@@ -222,6 +223,7 @@ Indices GraphModelStorage::getNodeIdsRange(int64_t start, int64_t size) {
 }
 
 torch::Tensor GraphModelStorage::getNodeEmbeddings(Indices indices, int32_t device_idx) {
+    runtime_profile::ScopedTimer timer(runtime_profile::storage_get_embeddings_ns, runtime_profile::storage_get_embeddings_calls);
     if (!train_ && (instance_of<Storage, PartitionBufferStorage>(storage_ptrs_.node_embeddings)) && full_graph_evaluation_) {
         if (in_memory_embeddings_ != nullptr) {
             return in_memory_embeddings_->indexRead(indices);
@@ -243,6 +245,7 @@ torch::Tensor GraphModelStorage::getNodeEmbeddings(Indices indices, int32_t devi
 }
 
 torch::Tensor GraphModelStorage::getNodeEmbeddingsG(Indices indices, int32_t device_idx) {
+    runtime_profile::ScopedTimer timer(runtime_profile::storage_get_embeddings_ns, runtime_profile::storage_get_embeddings_calls);
     if (storage_ptrs_.node_embeddings_g != nullptr) {
         if (instance_of<Storage, MemPartitionBufferStorage>(storage_ptrs_.node_embeddings_g)) {
             return std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_embeddings_g)->indexRead(indices, device_idx);
@@ -346,6 +349,7 @@ void GraphModelStorage::updatePutEncodedNodesRange(int64_t start, int64_t size, 
 }
 
 OptimizerState GraphModelStorage::getNodeEmbeddingState(Indices indices, int32_t device_idx) {
+    runtime_profile::ScopedTimer timer(runtime_profile::storage_get_state_ns, runtime_profile::storage_get_state_calls);
     if (storage_ptrs_.node_optimizer_state != nullptr) {
         if (instance_of<Storage, MemPartitionBufferStorage>(storage_ptrs_.node_optimizer_state)) {
             return std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_optimizer_state)->indexRead(indices, device_idx);
@@ -359,6 +363,7 @@ OptimizerState GraphModelStorage::getNodeEmbeddingState(Indices indices, int32_t
 }
 
 OptimizerState GraphModelStorage::getNodeEmbeddingStateG(Indices indices, int32_t device_idx) {
+    runtime_profile::ScopedTimer timer(runtime_profile::storage_get_state_ns, runtime_profile::storage_get_state_calls);
     if (storage_ptrs_.node_optimizer_state_g != nullptr) {
         if (instance_of<Storage, MemPartitionBufferStorage>(storage_ptrs_.node_embeddings_g)) {
             return std::dynamic_pointer_cast<MemPartitionBufferStorage>(storage_ptrs_.node_optimizer_state_g)->indexRead(indices, device_idx);

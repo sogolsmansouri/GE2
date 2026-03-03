@@ -10,6 +10,7 @@
 #include <future>
 #include <shared_mutex>
 
+#include "common/runtime_profile.h"
 #include "configuration/constants.h"
 #include "reporting/logger.h"
 
@@ -777,6 +778,7 @@ void MemPartitionBuffer::load(torch::Tensor data_storage) {
 }
 
 void MemPartitionBuffer::indexAdd(torch::Tensor indices, torch::Tensor values) {
+    runtime_profile::ScopedTimer timer(runtime_profile::buffer_index_add_ns, runtime_profile::buffer_index_add_calls);
     if (!values.defined() || indices.sizes().size() != 1 || indices.size(0) != values.size(0) || buffer_tensor_gpu_view_.size(1) != values.size(1)) {
         // TODO: throw invalid input to func exception
         throw std::runtime_error("");
@@ -966,6 +968,7 @@ void MemPartitionBuffer::admit(std::vector<Partition *> admit_partitions, std::v
 }
 
 torch::Tensor MemPartitionBuffer::indexRead(torch::Tensor indices) {
+    runtime_profile::ScopedTimer timer(runtime_profile::buffer_index_read_ns, runtime_profile::buffer_index_read_calls);
     if (indices.sizes().size() != 1) {
         // TODO: throw invalid input to func exception
         throw std::runtime_error("");

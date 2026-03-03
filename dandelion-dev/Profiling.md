@@ -109,6 +109,26 @@ Or export stats in terminal:
 nsys stats profiles/gege_train_nsys.nsys-rep
 ```
 
+### Save train + stats to log files
+
+Use this helper script to automatically write both training output and profiling summaries into `profiles/`:
+
+```bash
+./scripts/profile_fb15k_with_logs.sh
+```
+
+Optional arguments:
+
+```bash
+./scripts/profile_fb15k_with_logs.sh gege/configs/fb15k.yaml mytag
+```
+
+This creates:
+
+- `profiles/<tag>_<timestamp>_train.log`
+- `profiles/<tag>_<timestamp>_nsys_stats.txt`
+- `profiles/<tag>_<timestamp>_nsys.nsys-rep`
+
 ## 4. Full kernel profiling with Nsight Compute
 
 Use `ncu` after `nsys` identifies the expensive kernels.

@@ -1,10 +1,13 @@
 #include "nn/decoders/edge/decoder_methods.h"
 
+#include "common/nvtx_range.h"
 #include "configuration/options.h"
 
 #include <iostream>
 
 std::tuple<torch::Tensor, torch::Tensor> only_pos_forward(shared_ptr<EdgeDecoder> decoder, torch::Tensor edges, torch::Tensor node_embeddings) {
+    nvtx3::scoped_range range{"decode.only_pos_forward"};
+
     torch::Tensor pos_scores;
     torch::Tensor inv_pos_scores;
 
@@ -43,6 +46,8 @@ std::tuple<torch::Tensor, torch::Tensor> only_pos_forward(shared_ptr<EdgeDecoder
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> neg_and_pos_forward(shared_ptr<EdgeDecoder> decoder, torch::Tensor positive_edges,
                                                                                            torch::Tensor negative_edges, torch::Tensor node_embeddings) {
+    nvtx3::scoped_range range{"decode.neg_and_pos_forward"};
+
     torch::Tensor pos_scores;
     torch::Tensor inv_pos_scores;
     torch::Tensor neg_scores;
@@ -57,6 +62,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> neg_and_p
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> node_corrupt_forward(shared_ptr<EdgeDecoder> decoder, torch::Tensor positive_edges,
                                                                                             torch::Tensor node_embeddings, torch::Tensor dst_negs,
                                                                                             torch::Tensor src_negs) {
+    nvtx3::scoped_range range{"decode.node_corrupt_forward"};
+
     torch::Tensor pos_scores;
     torch::Tensor inv_pos_scores;
     torch::Tensor neg_scores;
@@ -112,6 +119,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> node_corr
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> rel_corrupt_forward(shared_ptr<EdgeDecoder> decoder, torch::Tensor positive_edges,
                                                                                            torch::Tensor node_embeddings, torch::Tensor neg_rel_ids) {
+    nvtx3::scoped_range range{"decode.rel_corrupt_forward"};
+
     torch::Tensor pos_scores;
     torch::Tensor inv_pos_scores;
     torch::Tensor neg_scores;
@@ -144,6 +153,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> rel_corru
 }
 
 std::tuple<torch::Tensor, torch::Tensor> prepare_pos_embeddings(shared_ptr<EdgeDecoder> decoder, torch::Tensor positive_edges, torch::Tensor src_embeddings, torch::Tensor dst_embeddings, bool has_relations) {
+    nvtx3::scoped_range range{"decode.prepare_pos_embeddings"};
+
     torch::Tensor adjusted_src_embeddings;
     torch::Tensor adjusted_dst_embeddings;
 
@@ -169,6 +180,8 @@ std::tuple<torch::Tensor, torch::Tensor> prepare_pos_embeddings(shared_ptr<EdgeD
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> mod_node_corrupt_forward(NegativeSamplingMethod negative_sampling_method, float negative_sampling_selected_ratio, shared_ptr<NegativeSampler> negative_sampler,
                                                                                                 shared_ptr<EdgeDecoder> decoder, torch::Tensor positive_edges, torch::Tensor node_embeddings, torch::Tensor dst_negs, torch::Tensor src_negs,
                                                                                                 torch::Tensor node_embeddings_g) {
+    nvtx3::scoped_range range{"decode.mod_node_corrupt_forward"};
+
     bool has_relations;
     if (positive_edges.size(1) == 3) {
         has_relations = true;
@@ -235,18 +248,29 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> mod_node_
             }
         }
 
-        auto all_negs_scores = negative_sampler->compute(adjusted_src_embeddings, adjusted_dst_embeddings, dst_neg_embeddings, src_neg_embeddings,
-                                              src_embeddings_g, dst_embeddings_g, dst_neg_embeddings_g, src_neg_embeddings_g,
-                                              batch_num, embedding_size, chunk_num, num_per_chunk, has_relations, decoder->use_inverse_relations_);
+        torch::Tensor dst_negs_scores;
+        torch::Tensor src_negs_scores;
+        {
+            nvtx3::scoped_range neg_compute_range{"neg_compute.dispatch"};
+            auto all_negs_scores = negative_sampler->compute(adjusted_src_embeddings, adjusted_dst_embeddings, dst_neg_embeddings, src_neg_embeddings,
+                                                             src_embeddings_g, dst_embeddings_g, dst_neg_embeddings_g, src_neg_embeddings_g,
+                                                             batch_num, embedding_size, chunk_num, num_per_chunk, has_relations, decoder->use_inverse_relations_);
+            dst_negs_scores = std::get<0>(all_negs_scores);
+            src_negs_scores = std::get<1>(all_negs_scores);
+        }
 
-        torch::Tensor dst_negs_scores = std::get<0>(all_negs_scores);
-        torch::Tensor src_negs_scores = std::get<1>(all_negs_scores);
+        torch::Tensor selected_dst_negs;
+        torch::Tensor selected_src_negs;
+        {
+            nvtx3::scoped_range neg_sample_range{"neg_sample.dispatch"};
+            auto all_selected_negs = negative_sampler->sample(dst_negs, src_negs, dst_negs_scores, src_negs_scores, chunk_num, num_per_chunk, selected_negatives_num,
+                                                              has_relations, decoder->use_inverse_relations_);
+            selected_dst_negs = std::get<0>(all_selected_negs);
+            selected_src_negs = std::get<1>(all_selected_negs);
+        }
 
-        auto all_selected_negs = negative_sampler->sample(dst_negs, src_negs, dst_negs_scores, src_negs_scores, chunk_num, num_per_chunk, selected_negatives_num,
-                                                          has_relations, decoder->use_inverse_relations_);
-
-        dst_negs = std::get<0>(all_selected_negs);
-        src_negs = std::get<1>(all_selected_negs);
+        dst_negs = selected_dst_negs;
+        src_negs = selected_src_negs;
     }
 
     torch::Tensor pos_scores;

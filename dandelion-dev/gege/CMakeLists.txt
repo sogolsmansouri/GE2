@@ -136,6 +136,24 @@ include_directories(${TORCH_INCLUDE_DIRS})
 include_directories(${project_THIRD_PARTY_DIR}/parallel-hashmap/)
 include_directories(${project_BINDINGS})
 
+set(GEGE_NVTX_HINTS "")
+if(DEFINED ENV{NSYS})
+    get_filename_component(_GEGE_NSYS_DIR "$ENV{NSYS}" DIRECTORY)
+    list(APPEND GEGE_NVTX_HINTS "${_GEGE_NSYS_DIR}/nvtx/include")
+endif()
+if(DEFINED ENV{CONDA_PREFIX})
+    list(APPEND GEGE_NVTX_HINTS "$ENV{CONDA_PREFIX}/nsight-compute/2024.1.1/host/target-linux-x64/nvtx/include")
+    list(APPEND GEGE_NVTX_HINTS "$ENV{CONDA_PREFIX}/targets/x86_64-linux/include")
+endif()
+
+find_path(GEGE_NVTX_INCLUDE_DIR nvtx3/nvtx3.hpp HINTS ${GEGE_NVTX_HINTS})
+if(GEGE_NVTX_INCLUDE_DIR)
+    message(STATUS "NVTX include found: ${GEGE_NVTX_INCLUDE_DIR}")
+    include_directories(${GEGE_NVTX_INCLUDE_DIR})
+else()
+    message(STATUS "NVTX include not found, using fallback no-op nvtx range")
+endif()
+
 add_library(${PROJECT_NAME}
             SHARED
             ${project_SOURCES}

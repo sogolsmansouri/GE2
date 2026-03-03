@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common/nvtx_range.h"
 #include "storage/graph_storage.h"
 
 std::tuple<torch::Tensor, torch::Tensor> batch_sample(torch::Tensor edges, int num_negatives, bool inverse = false);
@@ -108,6 +109,8 @@ class RNS : public NegativeSamplingBase {
     std::tuple<torch::Tensor, torch::Tensor> compute(torch::Tensor src_embeddings, torch::Tensor dst_embeddings, torch::Tensor dst_neg_embeddings, torch::Tensor src_neg_embeddings,
                                                              torch::Tensor src_embeddings_g, torch::Tensor dst_embeddings_g, torch::Tensor dst_neg_embeddings_g, torch::Tensor src_neg_embeddings_g,
                                                              int batch_num, int embedding_size, int chunk_num, int num_per_chunk, bool has_relations, bool use_inverse_relations) override {
+        nvtx3::scoped_range range{"neg_compute.rns"};
+
         torch::Tensor dst_negs_scores;
         torch::Tensor src_negs_scores;
         return std::forward_as_tuple(dst_negs_scores, src_negs_scores);
@@ -115,6 +118,7 @@ class RNS : public NegativeSamplingBase {
 
     std::tuple<torch::Tensor, torch::Tensor> sample(torch::Tensor dst_negs, torch::Tensor src_negs, torch::Tensor dst_negs_scores, torch::Tensor src_negs_scores,
                                                              int chunk_num, int num_per_chunk, int selected_negatives_num, bool has_relations, bool use_inverse_relations) override {
+        nvtx3::scoped_range range{"neg_sample.rns"};
         return std::forward_as_tuple(dst_negs, src_negs);
     }
 
@@ -130,6 +134,8 @@ class DNS : public NegativeSamplingBase {
     std::tuple<torch::Tensor, torch::Tensor> compute(torch::Tensor src_embeddings, torch::Tensor dst_embeddings, torch::Tensor dst_neg_embeddings, torch::Tensor src_neg_embeddings,
                                                              torch::Tensor src_embeddings_g, torch::Tensor dst_embeddings_g, torch::Tensor dst_neg_embeddings_g, torch::Tensor src_neg_embeddings_g,
                                                              int batch_num, int embedding_size, int chunk_num, int num_per_chunk, bool has_relations, bool use_inverse_relations) override {
+        nvtx3::scoped_range range{"neg_compute.dns"};
+
         torch::Tensor dst_negs_scores;
         torch::Tensor src_negs_scores;
         // could have problem if batch_num < chunk_num when padding.
@@ -154,6 +160,8 @@ class DNS : public NegativeSamplingBase {
 
     std::tuple<torch::Tensor, torch::Tensor> sample(torch::Tensor dst_negs, torch::Tensor src_negs, torch::Tensor dst_negs_scores, torch::Tensor src_negs_scores,
                                                              int chunk_num, int num_per_chunk, int selected_negatives_num, bool has_relations, bool use_inverse_relations) override {
+        nvtx3::scoped_range range{"neg_sample.dns"};
+
         torch::Tensor selected_dst_negs;
         torch::Tensor selected_src_negs;
 
@@ -185,6 +193,8 @@ class KBGAN : public NegativeSamplingBase {
     std::tuple<torch::Tensor, torch::Tensor> compute(torch::Tensor src_embeddings, torch::Tensor dst_embeddings, torch::Tensor dst_neg_embeddings, torch::Tensor src_neg_embeddings,
                                                              torch::Tensor src_embeddings_g, torch::Tensor dst_embeddings_g, torch::Tensor dst_neg_embeddings_g, torch::Tensor src_neg_embeddings_g,
                                                              int batch_num, int embedding_size, int chunk_num, int num_per_chunk, bool has_relations, bool use_inverse_relations) override {
+        nvtx3::scoped_range range{"neg_compute.gan"};
+
         torch::Tensor dst_negs_scores;
         torch::Tensor src_negs_scores;
         // could have problem if batch_num < chunk_num when padding.
@@ -209,6 +219,8 @@ class KBGAN : public NegativeSamplingBase {
 
     std::tuple<torch::Tensor, torch::Tensor> sample(torch::Tensor dst_negs, torch::Tensor src_negs, torch::Tensor dst_negs_scores, torch::Tensor src_negs_scores,
                                                              int chunk_num, int num_per_chunk, int selected_negatives_num, bool has_relations, bool use_inverse_relations) override {
+        nvtx3::scoped_range range{"neg_sample.gan"};
+
         torch::Tensor selected_dst_negs;
         torch::Tensor selected_src_negs;
 

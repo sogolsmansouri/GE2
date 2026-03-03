@@ -1,5 +1,6 @@
 #include "data/dataloader.h"
 
+#include "common/runtime_profile.h"
 #include "common/util.h"
 #include "data/ordering.h"
 #include <c10/cuda/CUDACachingAllocator.h>
@@ -789,6 +790,8 @@ void DataLoader::loadCPUParameters(shared_ptr<Batch> batch) {
 }
 
 void DataLoader::loadGPUParameters(shared_ptr<Batch> batch, int32_t device_idx) {
+    runtime_profile::ScopedTimer timer(runtime_profile::load_gpu_params_ns, runtime_profile::load_gpu_params_calls);
+
     if (graph_storage_->storage_ptrs_.node_embeddings != nullptr) {
         if (graph_storage_->storage_ptrs_.node_embeddings->device_ == torch::kCUDA) {
 
@@ -817,11 +820,13 @@ void DataLoader::loadGPUParameters(shared_ptr<Batch> batch, int32_t device_idx) 
 
 void DataLoader::updateEmbeddings(shared_ptr<Batch> batch, bool gpu, int32_t device_idx) {
     if (gpu) {
+        runtime_profile::ScopedTimer timer(runtime_profile::update_embeddings_gpu_ns, runtime_profile::update_embeddings_gpu_calls);
         if (graph_storage_->storage_ptrs_.node_embeddings->device_ == torch::kCUDA) {
             graph_storage_->updateAddNodeEmbeddings(batch->unique_node_indices_, batch->node_gradients_, device_idx);
             graph_storage_->updateAddNodeEmbeddingState(batch->unique_node_indices_, batch->node_state_update_, device_idx);
         }
     } else {
+        runtime_profile::ScopedTimer timer(runtime_profile::update_embeddings_host_ns, runtime_profile::update_embeddings_host_calls);
         batch->host_transfer_.synchronize();
         if (graph_storage_->storage_ptrs_.node_embeddings->device_ != torch::kCUDA) {
             graph_storage_->updateAddNodeEmbeddings(batch->unique_node_indices_, batch->node_gradients_);
@@ -833,11 +838,13 @@ void DataLoader::updateEmbeddings(shared_ptr<Batch> batch, bool gpu, int32_t dev
 
 void DataLoader::updateEmbeddingsG(shared_ptr<Batch> batch, bool gpu, int32_t device_idx) {
     if (gpu) {
+        runtime_profile::ScopedTimer timer(runtime_profile::update_embeddings_gpu_ns, runtime_profile::update_embeddings_gpu_calls);
         if (graph_storage_->storage_ptrs_.node_embeddings_g->device_ == torch::kCUDA) {
             graph_storage_->updateAddNodeEmbeddingsG(batch->unique_node_indices_, batch->node_gradients_g_, device_idx);
             graph_storage_->updateAddNodeEmbeddingStateG(batch->unique_node_indices_, batch->node_state_update_g_, device_idx);
         }
     } else {
+        runtime_profile::ScopedTimer timer(runtime_profile::update_embeddings_host_ns, runtime_profile::update_embeddings_host_calls);
         batch->host_transfer_.synchronize();
         if (graph_storage_->storage_ptrs_.node_embeddings_g->device_ != torch::kCUDA) {
             graph_storage_->updateAddNodeEmbeddingsG(batch->unique_node_indices_, batch->node_gradients_g_);
