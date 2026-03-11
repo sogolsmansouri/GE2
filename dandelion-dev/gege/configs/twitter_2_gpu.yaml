@@ -1,20 +1,19 @@
 model:
-  random_seed: 5650194872900178194
   learning_task: LINK_PREDICTION
   encoder:
     layers:
       - - type: EMBEDDING
-          output_dim: 100
+          output_dim: 50
   decoder:
     type: DISTMULT
     options:
-      input_dim: 100
+      input_dim: 50
   loss:
     type: SOFTMAX_CE
     options:
       reduction: SUM
   dense_optimizer:
-      type: ADAGRAD
+      type: ADAM
       options:
         learning_rate: 0.1
   sparse_optimizer:
@@ -23,37 +22,40 @@ model:
         learning_rate: 0.1
 storage:
   device_type: cuda
-  device_ids: [0,1]
+  device_ids: [0, 1]
   dataset:
-    dataset_dir: ./datasets/livejournal_16p
+    dataset_dir: ./datasets/twitter_16p
   edges:
     type: HOST_MEMORY
+    options:
+      dtype: int
   embeddings:
     type: MEM_PARTITION_BUFFER
     options:
       num_partitions: 16
       buffer_capacity: 4
       prefetching: false
-      fine_to_coarse_ratio: 1
+      fine_to_coarse_ratio: 2
       num_cache_partitions: 0
-      edge_bucket_ordering: CUSTOM
+      edge_bucket_ordering: COMET
+      node_partition_ordering: DISPERSED
       randomly_assign_edge_buckets: false
+      inter_gpu_swap: false
+      mock_num_devices_for_schedule: 0
   prefetch: false
-  save_model: false
 training:
-  batch_size: 50000
-  negative_sampling_method: RNS
-  negative_sampling_selected_ratio: 0.1
+  batch_size: 10000
+  negative_sampling_method: GAN
   negative_sampling:
-    num_chunks: 50
+    num_chunks: 10
     negatives_per_positive: 1000
     degree_fraction: 0.0
     filtered: false
-  num_epochs: 30
+  num_epochs: 10
   epochs_per_shuffle: 1
 evaluation:
-  epochs_per_eval: 10
-  batch_size: 1000
+  epochs_per_eval: 5
+  batch_size: 10000
   negative_sampling:
     num_chunks: 1
     negatives_per_positive: 10000

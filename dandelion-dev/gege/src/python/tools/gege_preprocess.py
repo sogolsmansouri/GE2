@@ -27,6 +27,14 @@ except ModuleNotFoundError:
     BUILTIN_DATASETS_AVAILABLE = False
 
 
+def resolve_local_twitter_edges() -> Path | None:
+    candidate = Path.cwd() / "raw" / "twitter_combined.txt"
+    if candidate.exists():
+        return candidate
+
+    return None
+
+
 def set_args():
     parser = argparse.ArgumentParser(description="Preprocess Datasets", prog="preprocess")
 
@@ -152,10 +160,25 @@ def main():
             partitioned_eval=args.partitioned_eval,
         )
     else:
+        local_twitter_edges = None
+        if args.dataset.lower() == "twitter" and not BUILTIN_DATASETS_AVAILABLE:
+            local_twitter_edges = resolve_local_twitter_edges()
+
+        if local_twitter_edges is not None:
+            print(f"Using local Twitter edge list: {local_twitter_edges}")
+            args.dataset = "custom"
+            args.edges = [str(local_twitter_edges)]
+            if args.delim == "\t":
+                args.delim = " "
+            if args.columns == [0, 1, 2]:
+                args.columns = [0, 1]
+
         if args.dataset.lower() != "custom" and not BUILTIN_DATASETS_AVAILABLE:
             raise ModuleNotFoundError(
                 "Built-in dataset downloaders are not available in this checkout. "
-                "Use --dataset custom with --edges <train> <valid> <test>."
+                "Use --dataset custom with --edges <train> <valid> <test>. "
+                "For the local Twitter SNAP file, run from the repo root and use "
+                "--dataset custom --edges raw/twitter_combined.txt --columns 0 1 -d ' '."
             )
 
         print("Preprocess custom dataset")

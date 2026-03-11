@@ -22,6 +22,7 @@ model:
         learning_rate: 0.1
 storage:
   device_type: cuda
+  device_ids: [0,1]
   dataset:
     dataset_dir: ./datasets/twitter_16p
   edges:

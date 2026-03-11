@@ -197,7 +197,15 @@ torch::Tensor compute_filter_corruption_cpu(shared_ptr<GegeGraph> graph, torch::
     }
     return filter;
 }
+/*
 
+    @zizhong
+    ToDo:‼️
+    The following code might(very likely) has bugs!!!!!
+    it doesn't generate false negative filter correctly.
+
+
+*/
 torch::Tensor compute_filter_corruption_gpu(shared_ptr<GegeGraph> graph, torch::Tensor edges, torch::Tensor corruption_nodes, bool inverse, bool global,
                                             LocalFilterMode local_filter_mode, torch::Tensor deg_sample_indices) {
     if (local_filter_mode == LocalFilterMode::DEG && !global) {
@@ -307,8 +315,192 @@ torch::Tensor compute_filter_corruption_gpu(shared_ptr<GegeGraph> graph, torch::
     return filter;
 }
 
+// a simple fixed version
+// torch::Tensor compute_filter_corruption_gpu(
+//     shared_ptr<GegeGraph> graph,
+//     torch::Tensor edges,
+//     torch::Tensor corruption_nodes,
+//     bool inverse,
+//     bool global,
+//     LocalFilterMode local_filter_mode,
+//     torch::Tensor deg_sample_indices) 
+// {
+//     if (local_filter_mode == LocalFilterMode::DEG && !global) {
+//         return deg_negative_local_filter(deg_sample_indices, edges);
+//     }
+
+//     bool has_relations;
+
+//     if (edges.dim() == 3) {
+//         edges = edges.flatten(0, 1);
+//     } else if (edges.dim() != 2) {
+//         throw TensorSizeMismatchException(edges, "Edge list must have three (if chunked) or two dimensions");
+//     }
+
+//     if (edges.size(-1) == 3) {
+//         has_relations = true;
+//     } else if (edges.size(-1) == 2) {
+//         has_relations = false;
+//     } else {
+//         throw TensorSizeMismatchException(edges, "Edge list tensor must have 3 or 2 columns.");
+//     }
+
+//     int64_t num_chunks = corruption_nodes.size(0);
+//     int64_t num_edges = edges.size(0);
+//     int64_t chunk_size = (int64_t)ceil((double)num_edges / num_chunks);
+//     int64_t negs_per_pos = corruption_nodes.size(1);
+
+//     torch::Tensor all_sorted_edges;
+//     torch::Tensor all_sorted_nodes;
+//     torch::Tensor nodes;
+//     int tup_id;
+//     int corrupt_id;
+
+//     if (inverse) {
+//         if (has_relations) {
+//             tup_id = 2;
+//         } else {
+//             tup_id = 1;
+//         }
+
+//         corrupt_id = 0;
+//         nodes = edges.select(1, tup_id).contiguous();
+
+//         if (global) {
+//             all_sorted_edges = graph->all_dst_sorted_edges_;
+//         } else {
+//             all_sorted_edges = edges.index_select(0, nodes.argsort());
+//         }
+
+//         all_sorted_nodes = all_sorted_edges.select(1, tup_id).contiguous();
+//     } else {
+//         tup_id = 0;
+
+//         if (has_relations) {
+//             corrupt_id = 2;
+//         } else {
+//             corrupt_id = 1;
+//         }
+
+//         nodes = edges.select(1, tup_id).contiguous();
+
+//         if (global) {
+//             all_sorted_edges = graph->all_src_sorted_edges_;
+//         } else {
+//             all_sorted_edges = edges.index_select(0, nodes.argsort());
+//         }
+
+//         all_sorted_nodes = all_sorted_edges.select(1, tup_id).contiguous();
+//     }
+
+//     if (!global) {
+//         throw GegeRuntimeException("Local filtering against all edges in the batch not yet supported on GPU.");
+//     }
+
+//     // Find neighbor ranges in sorted edge list
+//     torch::Tensor starts = torch::searchsorted(all_sorted_nodes, nodes);
+//     torch::Tensor ends = torch::searchsorted(all_sorted_nodes, nodes + 1);
+//     torch::Tensor num_neighbors = ends - starts;
+
+//     torch::Tensor summed_num_neighbors = num_neighbors.cumsum(0);
+//     torch::Tensor local_offsets = summed_num_neighbors - num_neighbors;
+
+//     torch::Tensor repeated_starts = starts.repeat_interleave(num_neighbors);
+//     torch::Tensor repeated_offsets = local_offsets.repeat_interleave(num_neighbors);
+//     torch::Tensor arange = torch::arange(repeated_offsets.size(0), edges.options());
+//     torch::Tensor sorted_list_idx = repeated_starts + arange - repeated_offsets;
+
+//     torch::Tensor batch_neighbors = all_sorted_edges.index_select(0, sorted_list_idx);
+//     torch::Tensor edge_ids = torch::arange(edges.size(0), edges.options()).repeat_interleave(num_neighbors);
+
+//     torch::Tensor candidate_neighbor_nodes;
+//     if (has_relations) {
+//         torch::Tensor rel_ids = edges.select(1, 1).repeat_interleave(num_neighbors);
+//         torch::Tensor neighbor_rels = batch_neighbors.select(1, 1);
+//         torch::Tensor rel_mask = neighbor_rels == rel_ids;
+
+//         torch::Tensor valid_idx =
+//             torch::arange(batch_neighbors.size(0), batch_neighbors.options()).masked_select(rel_mask);
+
+//         batch_neighbors = batch_neighbors.index_select(0, valid_idx);
+//         edge_ids = edge_ids.index_select(0, valid_idx);
+//         candidate_neighbor_nodes = batch_neighbors.select(1, corrupt_id).contiguous();
+//     } else {
+//         candidate_neighbor_nodes = batch_neighbors.select(1, corrupt_id).contiguous();
+//     }
+
+//     // ------------------------------------------------------------
+//     // FIX:
+//     // Map global neighbor node ids -> sampled negative column indices
+//     // ------------------------------------------------------------
+
+//     // edge -> chunk mapping
+//     torch::Tensor edge_chunk_ids = torch::div(edge_ids, chunk_size, "floor");
+//     edge_chunk_ids = torch::clamp(edge_chunk_ids, 0, num_chunks - 1);
+
+//     // Build result on CPU for simplicity/correctness first.
+//     // This is not the fastest version, but it preserves semantics.
+//     auto edge_ids_cpu = edge_ids.to(torch::kCPU);
+//     auto edge_chunk_ids_cpu = edge_chunk_ids.to(torch::kCPU);
+//     auto candidate_neighbor_nodes_cpu = candidate_neighbor_nodes.to(torch::kCPU);
+//     auto corruption_nodes_cpu = corruption_nodes.to(torch::kCPU);
+
+//     std::vector<int64_t> out_edge_ids;
+//     std::vector<int64_t> out_neg_cols;
+
+//     auto edge_ids_acc = edge_ids_cpu.accessor<int64_t, 1>();
+//     auto chunk_ids_acc = edge_chunk_ids_cpu.accessor<int64_t, 1>();
+//     auto neighbor_nodes_acc = candidate_neighbor_nodes_cpu.accessor<int64_t, 1>();
+//     auto corruption_acc = corruption_nodes_cpu.accessor<int64_t, 2>();
+
+//     for (int64_t i = 0; i < edge_ids_cpu.size(0); i++) {
+//         int64_t e_id = edge_ids_acc[i];
+//         int64_t c_id = chunk_ids_acc[i];
+//         int64_t neighbor_node = neighbor_nodes_acc[i];
+
+//         // Find neighbor_node in this chunk's sampled negatives
+//         for (int64_t col = 0; col < negs_per_pos; col++) {
+//             if (corruption_acc[c_id][col] == neighbor_node) {
+//                 out_edge_ids.push_back(e_id);
+//                 out_neg_cols.push_back(col);
+//             }
+//         }
+//     }
+
+//     auto long_opts_cpu = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
+
+//     if (out_edge_ids.empty()) {
+//         return torch::empty({0, 2},
+//                             torch::TensorOptions().dtype(torch::kInt64).device(edges.device()));
+//     }
+
+//     torch::Tensor out_edge_tensor = torch::from_blob(
+//         out_edge_ids.data(), {(int64_t)out_edge_ids.size()}, long_opts_cpu).clone();
+//     torch::Tensor out_col_tensor = torch::from_blob(
+//         out_neg_cols.data(), {(int64_t)out_neg_cols.size()}, long_opts_cpu).clone();
+
+//     torch::Tensor filter = torch::stack({out_edge_tensor, out_col_tensor}, 1).to(edges.device());
+
+//     return filter;
+// }
+
+/*
+    @zizhong
+    It turns the false negative score to -1e9, which is effectively ignored in the loss computation. 
+    This fucntion is costly because it write scores randomly on GPU(sparse access)
+    Eliminate underfitting negative score.
+*/
+// torch::Tensor apply_score_filter(torch::Tensor scores, torch::Tensor filter) {
+//     if (filter.defined()) {
+//         scores.index_put_({filter.select(1, 0), filter.select(1, 1)}, -1e9);
+//     }
+//     return scores;
+// }
+/*
+    test：filter确认全空，查看性能影响
+*/
 torch::Tensor apply_score_filter(torch::Tensor scores, torch::Tensor filter) {
-    if (filter.defined()) {
+    if (filter.defined() && filter.size(0) > 0) {
         scores.index_put_({filter.select(1, 0), filter.select(1, 1)}, -1e9);
     }
     return scores;
@@ -364,6 +556,9 @@ std::tuple<torch::Tensor, torch::Tensor> CorruptNodeNegativeSampler::getNegative
     if (degree_fraction_ > 0 && local_filter_mode_ == LocalFilterMode::DEG) {
         deg_sample_indices = torch::stack(deg_sample_indices_vec);
     }
+    /*
+        score filter 计算
+    */
     torch::Tensor score_filter = compute_filter_corruption(graph, edges, output_ids, inverse, filtered_, local_filter_mode_, deg_sample_indices);
     return std::forward_as_tuple(output_ids, score_filter);
 }

@@ -80,5 +80,6 @@ bool instance_of(std::shared_ptr<T1> instance) {
 }
 
 std::tuple<torch::Tensor, std::vector<torch::Tensor>> map_tensors(std::vector<torch::Tensor> unmapped_tensors);
-
+// for debugging
+std::tuple<torch::Tensor, std::vector<torch::Tensor>> my_map_tensors(std::vector<torch::Tensor> unmapped_tensors, bool train_);
 std::vector<torch::Tensor> apply_tensor_map(torch::Tensor map, std::vector<torch::Tensor> unmapped_tensors);

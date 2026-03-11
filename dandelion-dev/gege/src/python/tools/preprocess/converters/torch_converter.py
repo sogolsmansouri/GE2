@@ -115,11 +115,11 @@ def map_edge_list_dfs(edge_lists: list, known_node_ids=None, sequential_train_no
     output_edge_lists = []
     for edge_list in edge_lists:
         node_columns = edge_list.columns[[0, -1]]
-        edge_list[node_columns] = edge_list[node_columns].applymap(nodes_dict.get)
+        edge_list.loc[:, node_columns] = edge_list.loc[:, node_columns].apply(lambda col: col.map(nodes_dict.get))
 
         if has_rels:
             rel_columns = edge_list.columns[1]
-            edge_list[rel_columns] = edge_list[rel_columns].map(rels_dict.get)
+            edge_list.loc[:, rel_columns] = edge_list.loc[:, rel_columns].map(rels_dict.get)
 
         output_edge_lists.append(dataframe_to_tensor(edge_list))
 

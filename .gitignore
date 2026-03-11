@@ -21,3 +21,6 @@ raw/
 **/data/
 **/datasets/
 **/raw/
+
+unique_kernel_data_slice
+unique_kernel_data_slice.tar.gz

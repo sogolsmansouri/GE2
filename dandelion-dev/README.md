@@ -16,7 +16,7 @@ GE^2
 
 ### Run Commands
 
-        $ gege_preprocess --dataset twitter --output_dir datasets/twitter -ds 0.9 0.05 0.05 --num_partition 16
+        $ gege_preprocess --dataset custom --edges raw/twitter_combined.txt --output_directory datasets/twitter --dataset_split 0.9 0.05 0.05 --num_partitions 16 --columns 0 1 -d ' '
         $ CUDA_VISIBLE_DEVICES=0,1 gege_train gege/configs/fb15k.yaml
 
 

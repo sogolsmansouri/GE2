@@ -471,7 +471,10 @@ void GraphModelStorage::initializeInMemorySubGraph(torch::Tensor buffer_state, t
                 global_edge_bucket_starts_accessor[idx] = edge_bucket_start;
             }
         }
-
+/*
+        @zizhong:
+        Above code corrosponding to the partion(e.g pair(P0,P1)) in the paper.
+*/
         torch::Tensor in_mem_edge_bucket_starts = in_mem_edge_bucket_sizes.cumsum(0);
         int64_t total_size = in_mem_edge_bucket_starts[-1].item<int64_t>();
         in_mem_edge_bucket_starts = in_mem_edge_bucket_starts - in_mem_edge_bucket_sizes;
@@ -479,6 +482,11 @@ void GraphModelStorage::initializeInMemorySubGraph(torch::Tensor buffer_state, t
         auto in_mem_edge_bucket_starts_accessor = in_mem_edge_bucket_starts.accessor<int64_t, 1>();
         current_subgraph_state_->all_in_memory_edges_ = torch::empty({total_size, storage_ptrs_.edges->dim1_size_}, torch::kInt64);
 
+/*
+        @zizhong:
+        the following openmp section load edges in the partioned subgraph to the memory, and concatenate them together. For example, if we have 4 partitions and buffer size is 2, then we will load edge buckets corresponding to (P0,P0), (P0,P1), (P1,P0), (P1,P1) to memory, and concatenate them together to form the in-memory subgraph.
+        it guarentees that the edges in the in-memory subgraph are sorted by source and destination partition, which is required for efficient merging of edge buckets and construction of the in-memory subgraph.
+*/
 #pragma omp parallel for
         for (int i = 0; i < num_edge_buckets_in_mem; i++) {
             int64_t edge_bucket_size = in_mem_edge_bucket_sizes_accessor[i];
@@ -488,7 +496,10 @@ void GraphModelStorage::initializeInMemorySubGraph(torch::Tensor buffer_state, t
                 storage_ptrs_.edges->range(edge_bucket_start, edge_bucket_size);
         }
 
-
+/*
+        @zizhong:
+        The above code corresponds to the step of loading edge to the partioned(P0,P1)
+*/
         if (storage_ptrs_.node_embeddings != nullptr) {
             if (instance_of<Storage, PartitionBufferStorage>(storage_ptrs_.node_embeddings)) {
                 current_subgraph_state_->global_to_local_index_map_ =
@@ -879,7 +890,11 @@ void GraphModelStorage::updateInMemorySubGraph_(shared_ptr<InMemorySubgraphState
         subgraph_cv_->notify_all();
     }
 }
-
+/*
+    @zizhong:
+    The following code does not use arg `starts`.
+    
+*/
 EdgeList GraphModelStorage::merge_sorted_edge_buckets(EdgeList edges, torch::Tensor starts, int buffer_size, bool src) {
     int sort_dim = 0;
     if (!src) {

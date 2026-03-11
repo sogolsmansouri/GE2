@@ -60,7 +60,7 @@ Use `nsys` first. It tells you whether time is spent in:
 ```bash
 mkdir -p profiles
 
-CUDA_VISIBLE_DEVICES=0 nsys profile   --trace=cuda,nvtx,osrt   --cuda-event-trace=false   --sample=none   --cpuctxsw=none   --force-overwrite=true   --output profiles/gege_train_20_epoch_nsys   gege_train gege/configs/fb15k.yaml
+CUDA_VISIBLE_DEVICES=0 nsys profile   --trace=cuda,nvtx,osrt   --cuda-event-trace=false   --sample=none   --cpuctxsw=none   --force-overwrite=true   --output profiles/trainer_profiling/single_GPU/baseline_result_new   gege_train profiles/trainer_profiling/single_GPU/fb15k.yaml
 ```
 
 ```bash

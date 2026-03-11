@@ -31,14 +31,14 @@ storage:
   save_model: false
 training:
   batch_size: 10000
-  negative_sampling_method: DNS
+  negative_sampling_method: RNS
   negative_sampling_selected_ratio: 0.2
   negative_sampling:
     num_chunks: 10
     negatives_per_positive: 1000
     degree_fraction: 0.0
     filtered: false
-  num_epochs: 4
+  num_epochs: 10
   epochs_per_shuffle: 1
 evaluation:
   batch_size: 1000

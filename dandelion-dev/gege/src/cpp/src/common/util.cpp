@@ -2,11 +2,13 @@
 
 #include <fstream>
 #include <unistd.h>
+#include <filesystem>
 
 #include <iostream>
 
 #include "reporting/logger.h"
-
+#include <nvtx3/nvtx3.hpp>
+#include <mutex>
 void assert_no_nans(torch::Tensor values) {
     if (torch::isnan(values).any().item<bool>()) {
         throw GegeRuntimeException("Tensor contains Nans");
@@ -154,29 +156,311 @@ std::string get_directory(std::string filename) {
 
     return directory;
 }
+/*
+    KG related tensor mapping.
+    2 major operations:
+    1. tensor.unique()
+    2. remapping
 
-std::tuple<torch::Tensor, std::vector<torch::Tensor>> map_tensors(std::vector<torch::Tensor> unmapped_tensors) {
-    for (auto tensor : unmapped_tensors) {
-        if (tensor.sizes().size() > 1) {
-            throw GegeRuntimeException("Input tensors must be 1D");
+*/
+// std::tuple<torch::Tensor, std::vector<torch::Tensor>> map_tensors(std::vector<torch::Tensor> unmapped_tensors) {
+//     for (auto tensor : unmapped_tensors) {
+//         if (tensor.sizes().size() > 1) {
+//             throw GegeRuntimeException("Input tensors must be 1D");
+//         }
+//     }
+
+//     torch::Tensor all_ids = torch::cat(unmapped_tensors);
+
+//     auto unique_tup = torch::_unique2(all_ids, true, true, false);
+
+//     torch::Tensor map = std::get<0>(unique_tup);
+//     torch::Tensor mapped_all_ids = std::get<1>(unique_tup);
+
+//     std::vector<torch::Tensor> mapped_tensors;
+
+//     int64_t offset = 0;
+//     int64_t size;
+//     for (auto tensor : unmapped_tensors) {
+//         size = tensor.size(0);
+//         mapped_tensors.emplace_back(mapped_all_ids.narrow(0, offset, size));
+//         offset += size;
+//     }
+
+//     return std::forward_as_tuple(map, mapped_tensors);
+// }
+
+/*
+    NVTX tag version
+*/
+
+// std::tuple<torch::Tensor, std::vector<torch::Tensor>> map_tensors(std::vector<torch::Tensor> unmapped_tensors) {
+//     {
+//         nvtx3::scoped_range r{"map_tensors_validate_inputs"};
+//         for (auto tensor : unmapped_tensors) {
+//             if (tensor.sizes().size() > 1) {
+//                 throw GegeRuntimeException("Input tensors must be 1D");
+//             }
+//         }
+//     }
+
+//     torch::Tensor all_ids;
+//     {
+//         nvtx3::scoped_range r{"map_tensors_cat"};
+//         all_ids = torch::cat(unmapped_tensors);
+//     }
+
+//     std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_tup;
+//     {
+
+//         /*
+//             torch.unique is the major bottleneck in mapping.
+//             avg_time >> medium_time
+            
+//         */
+//         nvtx3::scoped_range r{"map_tensors_unique2"};
+//         unique_tup = torch::_unique2(all_ids, true, true, false);
+//     }
+
+//     torch::Tensor map;
+//     torch::Tensor mapped_all_ids;
+//     {
+//         nvtx3::scoped_range r{"map_tensors_unpack_unique"};
+//         map = std::get<0>(unique_tup);
+//         mapped_all_ids = std::get<1>(unique_tup);
+//     }
+
+//     std::vector<torch::Tensor> mapped_tensors;
+//     {
+//         nvtx3::scoped_range r{"map_tensors_split_inverse"};
+//         int64_t offset = 0;
+//         int64_t size;
+//         for (auto tensor : unmapped_tensors) {
+//             size = tensor.size(0);
+//             mapped_tensors.emplace_back(mapped_all_ids.narrow(0, offset, size));
+//             offset += size;
+//         }
+//     }
+
+//     return std::forward_as_tuple(map, mapped_tensors);
+// }
+
+/*
+    NVTX+_unique2 profiling version
+    my_map_tensors add a new parameter: train_
+*/
+// std::tuple<torch::Tensor, std::vector<torch::Tensor>> my_map_tensors(std::vector<torch::Tensor> unmapped_tensors, bool train_) {
+//     static int64_t debug_counter = 0;
+//     static std::mutex log_mutex;
+
+//     const char* mode_str = train_ ? "train" : "eval";
+
+//     {
+//         std::string tag = std::string("map_tensors_") + mode_str + "_validate_inputs";
+//         nvtx3::scoped_range r{tag.c_str()};
+
+//         for (auto tensor : unmapped_tensors) {
+//             if (tensor.sizes().size() > 1) {
+//                 throw GegeRuntimeException("Input tensors must be 1D");
+//             }
+//         }
+//     }
+
+//     torch::Tensor all_ids;
+//     {
+//         std::string tag = std::string("map_tensors_") + mode_str + "_cat";
+//         nvtx3::scoped_range r{tag.c_str()};
+//         all_ids = torch::cat(unmapped_tensors);
+//     }
+
+//     std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_tup;
+//     {
+//         std::string tag = std::string("map_tensors_") + mode_str + "_unique2";
+//         nvtx3::scoped_range r{tag.c_str()};
+//         unique_tup = torch::_unique2(all_ids, true, true, false);//ascending order+return inverse = descending order
+//     }
+
+//     torch::Tensor map;
+//     torch::Tensor mapped_all_ids;
+//     {
+//         std::string tag = std::string("map_tensors_") + mode_str + "_unpack_unique";
+//         nvtx3::scoped_range r{tag.c_str()};
+//         map = std::get<0>(unique_tup);
+//         mapped_all_ids = std::get<1>(unique_tup);
+//     }
+
+//     {
+//         std::string tag = std::string("map_tensors_") + mode_str + "_stats";
+//         nvtx3::scoped_range r{tag.c_str()};
+//         std::lock_guard<std::mutex> guard(log_mutex);
+
+//         int64_t num_all_ids = all_ids.numel();
+//         int64_t num_unique_ids = map.numel();
+
+//         double unique_ratio = (num_all_ids > 0)
+//             ? static_cast<double>(num_unique_ids) / static_cast<double>(num_all_ids)
+//             : 0.0;
+//         double dup_ratio = 1.0 - unique_ratio;
+
+//         int64_t edge_src_num = unmapped_tensors.size() > 0 ? unmapped_tensors[0].numel() : 0;
+//         int64_t edge_dst_num = unmapped_tensors.size() > 1 ? unmapped_tensors[1].numel() : 0;
+//         int64_t src_neg_num  = unmapped_tensors.size() > 2 ? unmapped_tensors[2].numel() : 0;
+//         int64_t dst_neg_num  = unmapped_tensors.size() > 3 ? unmapped_tensors[3].numel() : 0;
+
+//         std::ofstream ofs("profiles/getBatch_profiling/single_GPU/unique_rate.txt", std::ios::app);
+
+//         ofs << "[map_tensors][" << debug_counter << "] "
+//             << "mode=" << mode_str
+//             << ", all_ids=" << num_all_ids
+//             << ", unique_ids=" << num_unique_ids
+//             << ", unique_ratio=" << unique_ratio
+//             << ", dup_ratio=" << dup_ratio
+//             << ", edge_src=" << edge_src_num
+//             << ", edge_dst=" << edge_dst_num
+//             << ", src_neg=" << src_neg_num
+//             << ", dst_neg=" << dst_neg_num
+//             << "\n";
+
+//         debug_counter++;
+//     }
+
+//     std::vector<torch::Tensor> mapped_tensors;
+//     {
+//         std::string tag = std::string("map_tensors_") + mode_str + "_split_inverse";
+//         nvtx3::scoped_range r{tag.c_str()};
+
+//         int64_t offset = 0;
+//         int64_t size;
+//         for (auto tensor : unmapped_tensors) {
+//             size = tensor.size(0);
+//             mapped_tensors.emplace_back(mapped_all_ids.narrow(0, offset, size));
+//             offset += size;
+//         }
+//     }
+
+//     return std::forward_as_tuple(map, mapped_tensors);
+// }
+
+/*
+
+    Get data slice
+*/
+
+std::tuple<torch::Tensor, std::vector<torch::Tensor>> my_map_tensors(std::vector<torch::Tensor> unmapped_tensors, bool train_) {
+    static int64_t debug_counter = 0;
+    static std::mutex log_mutex;
+
+    const char* mode_str = train_ ? "train" : "eval";
+
+    {
+        std::string tag = std::string("map_tensors_") + mode_str + "_validate_inputs";
+        nvtx3::scoped_range r{tag.c_str()};
+
+        for (auto tensor : unmapped_tensors) {
+            if (tensor.sizes().size() > 1) {
+                throw GegeRuntimeException("Input tensors must be 1D");
+            }
         }
     }
 
-    torch::Tensor all_ids = torch::cat(unmapped_tensors);
+    torch::Tensor all_ids;
+    {
+        std::string tag = std::string("map_tensors_") + mode_str + "_cat";
+        nvtx3::scoped_range r{tag.c_str()};
+        all_ids = torch::cat(unmapped_tensors);
+    }
 
-    auto unique_tup = torch::_unique2(all_ids, true, true, false);
+    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_tup;
+    torch::Tensor map;
+    torch::Tensor mapped_all_ids;
 
-    torch::Tensor map = std::get<0>(unique_tup);
-    torch::Tensor mapped_all_ids = std::get<1>(unique_tup);
+    int64_t current_debug_counter = -1;
+    if (train_) {
+        std::lock_guard<std::mutex> guard(log_mutex);
+        current_debug_counter = debug_counter;
+    }
+
+    if (train_) {
+        std::string slice_dir = "unique_kernel_data_slice/" + std::to_string(current_debug_counter);
+        std::filesystem::create_directories(slice_dir);
+
+        std::ofstream ofs(slice_dir + "/input.txt", std::ios::out);
+        ofs << all_ids;
+    }
+
+    {
+        std::string tag = std::string("map_tensors_") + mode_str + "_unique2";
+        nvtx3::scoped_range r{tag.c_str()};
+        unique_tup = torch::_unique2(all_ids, true, true, false);
+    }
+
+    {
+        std::string tag = std::string("map_tensors_") + mode_str + "_unpack_unique";
+        nvtx3::scoped_range r{tag.c_str()};
+        map = std::get<0>(unique_tup);
+        mapped_all_ids = std::get<1>(unique_tup);
+    }
+
+    if (train_) {
+        std::string slice_dir = "unique_kernel_data_slice/" + std::to_string(current_debug_counter);
+        std::filesystem::create_directories(slice_dir);
+
+        {
+            std::ofstream ofs(slice_dir + "/output_1.txt", std::ios::out);
+            ofs << map;
+        }
+        {
+            std::ofstream ofs(slice_dir + "/output_2.txt", std::ios::out);
+            ofs << mapped_all_ids;
+        }
+    }
+
+    if (train_) {
+        std::string tag = std::string("map_tensors_") + mode_str + "_stats";
+        nvtx3::scoped_range r{tag.c_str()};
+        std::lock_guard<std::mutex> guard(log_mutex);
+
+        int64_t num_all_ids = all_ids.numel();
+        int64_t num_unique_ids = map.numel();
+
+        double unique_ratio = (num_all_ids > 0)
+            ? static_cast<double>(num_unique_ids) / static_cast<double>(num_all_ids)
+            : 0.0;
+        double dup_ratio = 1.0 - unique_ratio;
+
+        int64_t edge_src_num = unmapped_tensors.size() > 0 ? unmapped_tensors[0].numel() : 0;
+        int64_t edge_dst_num = unmapped_tensors.size() > 1 ? unmapped_tensors[1].numel() : 0;
+        int64_t src_neg_num  = unmapped_tensors.size() > 2 ? unmapped_tensors[2].numel() : 0;
+        int64_t dst_neg_num  = unmapped_tensors.size() > 3 ? unmapped_tensors[3].numel() : 0;
+
+        std::ofstream ofs("profiles/getBatch_profiling/single_GPU/unique_rate.txt", std::ios::app);
+        ofs << "[map_tensors][" << debug_counter << "] "
+            << "mode=" << mode_str
+            << ", all_ids=" << num_all_ids
+            << ", unique_ids=" << num_unique_ids
+            << ", unique_ratio=" << unique_ratio
+            << ", dup_ratio=" << dup_ratio
+            << ", edge_src=" << edge_src_num
+            << ", edge_dst=" << edge_dst_num
+            << ", src_neg=" << src_neg_num
+            << ", dst_neg=" << dst_neg_num
+            << "\n";
+
+        debug_counter++;
+    }
 
     std::vector<torch::Tensor> mapped_tensors;
+    {
+        std::string tag = std::string("map_tensors_") + mode_str + "_split_inverse";
+        nvtx3::scoped_range r{tag.c_str()};
 
-    int64_t offset = 0;
-    int64_t size;
-    for (auto tensor : unmapped_tensors) {
-        size = tensor.size(0);
-        mapped_tensors.emplace_back(mapped_all_ids.narrow(0, offset, size));
-        offset += size;
+        int64_t offset = 0;
+        int64_t size;
+        for (auto tensor : unmapped_tensors) {
+            size = tensor.size(0);
+            mapped_tensors.emplace_back(mapped_all_ids.narrow(0, offset, size));
+            offset += size;
+        }
     }
 
     return std::forward_as_tuple(map, mapped_tensors);
@@ -184,6 +468,11 @@ std::tuple<torch::Tensor, std::vector<torch::Tensor>> map_tensors(std::vector<to
 
 // TODO this function uses a searchsorted to find the approriate value in the map tensor
 // this can be made faster on the cpu by using an std::map to perform lookups
+
+/*
+    @zizhong
+    This apply_tensor_map is used in gnn.
+*/
 std::vector<torch::Tensor> apply_tensor_map(torch::Tensor map, std::vector<torch::Tensor> unmapped_tensors) {
     for (auto tensor : unmapped_tensors) {
         if (tensor.sizes().size() > 1) {

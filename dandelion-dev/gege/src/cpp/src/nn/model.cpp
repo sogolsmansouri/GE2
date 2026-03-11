@@ -11,7 +11,7 @@
 #include "nn/layers/embedding/embedding.h"
 #include "nn/model_helpers.h"
 #include "reporting/logger.h"
-
+#include <nvtx3/nvtx3.hpp>
 Model::Model(shared_ptr<GeneralEncoder> encoder, shared_ptr<Decoder> decoder, shared_ptr<LossFunction> loss, shared_ptr<Reporter> reporter,
              std::vector<shared_ptr<Optimizer>> optimizers)
     : device_(torch::Device(torch::kCPU)) {
@@ -313,6 +313,10 @@ torch::Tensor Model::forward_nc(at::optional<torch::Tensor> node_embeddings, at:
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> Model::forward_lp(shared_ptr<Batch> batch, bool train) {
 
+    /*
+        @zizhong
+        forward propagation.
+    */
     torch::Tensor encoded_nodes = encoder_->forward(batch->node_embeddings_, batch->node_features_, batch->dense_graph_, train);
     // call proper decoder
     torch::Tensor pos_scores;
@@ -354,6 +358,174 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> Model::fo
 
     return std::forward_as_tuple(pos_scores, neg_scores, inv_pos_scores, inv_neg_scores);
 }
+/*
+    @zizhong
+    forward_lp with NVTX tags. 
+    Note: both training and evaluating use the same forward_lp func
+*/
+
+// std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+// Model::forward_lp(shared_ptr<Batch> batch, bool train) {
+
+//     if (train) {
+//         nvtx3::scoped_range forward_lp_range{"forward_lp_train_total"};
+
+//         /*
+//             @zizhong
+//             encoder forward: generate batch-local encoded node representations.
+//         */
+//         torch::Tensor encoded_nodes;
+//         {
+//             nvtx3::scoped_range r{"lp_encoder_forward_train"};//Almost takes NO time. basically just a copy of the input embeddings/features to the output "encoded_nodes" without much transformation. 
+//             encoded_nodes = encoder_->forward(
+//                 batch->node_embeddings_,
+//                 batch->node_features_,
+//                 batch->dense_graph_,
+//                 train
+//             );
+//         }
+
+//         // call proper decoder
+//         torch::Tensor pos_scores;
+//         torch::Tensor neg_scores;
+//         torch::Tensor inv_pos_scores;
+//         torch::Tensor inv_neg_scores;
+
+//         auto edge_decoder = std::dynamic_pointer_cast<EdgeDecoder>(decoder_);
+
+//         {
+//             nvtx3::scoped_range r{"lp_decoder_forward_train"};
+
+//             if (edge_decoder->decoder_method_ == EdgeDecoderMethod::ONLY_POS) {
+//                 nvtx3::scoped_range r2{"lp_only_pos_forward_train"};
+//                 std::tie(pos_scores, inv_pos_scores) =
+//                     only_pos_forward(edge_decoder, batch->edges_, encoded_nodes);
+
+//             } else if (edge_decoder->decoder_method_ == EdgeDecoderMethod::POS_AND_NEG) {
+//                 throw GegeRuntimeException("Decoder method currently unsupported.");
+//                 std::tie(pos_scores, neg_scores, inv_pos_scores, inv_neg_scores) =
+//                     neg_and_pos_forward(edge_decoder, batch->edges_, batch->neg_edges_, encoded_nodes);
+
+//             } else if (edge_decoder->decoder_method_ == EdgeDecoderMethod::CORRUPT_NODE) {
+//                 nvtx3::scoped_range r2{"lp_mod_node_corrupt_forward_train"};//1st time-consuming part.
+//                 std::tie(pos_scores, neg_scores, inv_pos_scores, inv_neg_scores) =
+//                     mod_node_corrupt_forward(
+//                         negative_sampling_method_,
+//                         negative_sampling_selected_ratio_,
+//                         negative_sampler_,
+//                         edge_decoder,
+//                         batch->edges_,
+//                         encoded_nodes,
+//                         batch->dst_neg_indices_mapping_,
+//                         batch->src_neg_indices_mapping_,
+//                         batch->node_embeddings_g_
+//                     );
+
+//             } else if (edge_decoder->decoder_method_ == EdgeDecoderMethod::CORRUPT_REL) {
+//                 throw GegeRuntimeException("Decoder method currently unsupported.");
+//                 std::tie(pos_scores, neg_scores, inv_pos_scores, inv_neg_scores) =
+//                     rel_corrupt_forward(edge_decoder, batch->edges_, encoded_nodes, batch->rel_neg_indices_);
+
+//             } else {
+//                 throw GegeRuntimeException("Unsupported encoder method");
+//             }
+//         }
+
+//         if (neg_scores.defined()) {
+//             nvtx3::scoped_range r{"lp_apply_neg_filter_train"};
+//             /*
+//                 @zizhong
+//                 1st time-consuming part.
+//                 This function is under data/samplers/negative.h.
+//                 This is a pure CUDA kernel.
+//                 Issue：负采样pipeline先算negative score，再去掉false negative. 这个函数会随机访问GPU上的score，导致性能很差。可以考虑在算score之前就把false negative filter掉，或者在CPU上算filter然后传到GPU上。
+//             */
+
+            
+
+//             neg_scores = apply_score_filter(neg_scores, batch->dst_neg_filter_);
+//         }
+
+//         if (inv_neg_scores.defined()) {
+//             nvtx3::scoped_range r{"lp_apply_inv_neg_filter_train"};
+//             inv_neg_scores = apply_score_filter(inv_neg_scores, batch->src_neg_filter_);
+//         }
+
+//         return std::forward_as_tuple(pos_scores, neg_scores, inv_pos_scores, inv_neg_scores);
+
+//     } else {
+//         nvtx3::scoped_range forward_lp_range{"forward_lp_eval_total"};
+
+//         /*
+//             @zizhong
+//             encoder forward: generate batch-local encoded node representations.
+//         */
+//         torch::Tensor encoded_nodes;
+//         {
+//             nvtx3::scoped_range r{"lp_encoder_forward_eval"};
+//             encoded_nodes = encoder_->forward(
+//                 batch->node_embeddings_,
+//                 batch->node_features_,
+//                 batch->dense_graph_,
+//                 train
+//             );
+//         }
+
+//         // call proper decoder
+//         torch::Tensor pos_scores;
+//         torch::Tensor neg_scores;
+//         torch::Tensor inv_pos_scores;
+//         torch::Tensor inv_neg_scores;
+
+//         auto edge_decoder = std::dynamic_pointer_cast<EdgeDecoder>(decoder_);
+
+//         {
+//             nvtx3::scoped_range r{"lp_decoder_forward_eval"};
+
+//             if (edge_decoder->decoder_method_ == EdgeDecoderMethod::ONLY_POS) {
+//                 nvtx3::scoped_range r2{"lp_only_pos_forward_eval"};
+//                 std::tie(pos_scores, inv_pos_scores) =
+//                     only_pos_forward(edge_decoder, batch->edges_, encoded_nodes);
+
+//             } else if (edge_decoder->decoder_method_ == EdgeDecoderMethod::POS_AND_NEG) {
+//                 throw GegeRuntimeException("Decoder method currently unsupported.");
+//                 std::tie(pos_scores, neg_scores, inv_pos_scores, inv_neg_scores) =
+//                     neg_and_pos_forward(edge_decoder, batch->edges_, batch->neg_edges_, encoded_nodes);
+
+//             } else if (edge_decoder->decoder_method_ == EdgeDecoderMethod::CORRUPT_NODE) {
+//                 nvtx3::scoped_range r2{"lp_node_corrupt_forward_eval"};
+//                 std::tie(pos_scores, neg_scores, inv_pos_scores, inv_neg_scores) =
+//                     node_corrupt_forward(
+//                         edge_decoder,
+//                         batch->edges_,
+//                         encoded_nodes,
+//                         batch->dst_neg_indices_mapping_,
+//                         batch->src_neg_indices_mapping_
+//                     );
+
+//             } else if (edge_decoder->decoder_method_ == EdgeDecoderMethod::CORRUPT_REL) {
+//                 throw GegeRuntimeException("Decoder method currently unsupported.");
+//                 std::tie(pos_scores, neg_scores, inv_pos_scores, inv_neg_scores) =
+//                     rel_corrupt_forward(edge_decoder, batch->edges_, encoded_nodes, batch->rel_neg_indices_);
+
+//             } else {
+//                 throw GegeRuntimeException("Unsupported encoder method");
+//             }
+//         }
+
+//         if (neg_scores.defined()) {
+//             nvtx3::scoped_range r{"lp_apply_neg_filter_eval"};
+//             neg_scores = apply_score_filter(neg_scores, batch->dst_neg_filter_);
+//         }
+
+//         if (inv_neg_scores.defined()) {
+//             nvtx3::scoped_range r{"lp_apply_inv_neg_filter_eval"};
+//             inv_neg_scores = apply_score_filter(inv_neg_scores, batch->src_neg_filter_);
+//         }
+
+//         return std::forward_as_tuple(pos_scores, neg_scores, inv_pos_scores, inv_neg_scores);
+//     }
+// }
 
 void Model::train_batch(shared_ptr<Batch> batch, bool call_step) {
     if (call_step) {
@@ -420,6 +592,137 @@ void Model::train_batch(shared_ptr<Batch> batch, bool call_step) {
         }
     }
 }
+/*
+    @zizhong
+    NVTX tag for profile
+*/
+// void Model::train_batch(shared_ptr<Batch> batch, bool call_step) {
+//     nvtx3::scoped_range train_batch_range{"train_batch_total"};
+
+//     if (call_step) {
+//         nvtx3::scoped_range r{"clear_grad"};
+//         clear_grad();
+//     }
+
+//     if (batch->node_embeddings_.defined()) {
+//         nvtx3::scoped_range r{"set_requires_grad"};
+//         batch->node_embeddings_.requires_grad_();
+//     }
+
+//     torch::Tensor loss;
+
+//     if (learning_task_ == LearningTask::LINK_PREDICTION) {
+//         torch::Tensor pos_scores, neg_scores, inv_pos_scores, inv_neg_scores;
+
+//         {
+//             nvtx3::scoped_range r{"forward_lp"};
+//             auto all_scores = forward_lp(batch, true);
+//             pos_scores = std::get<0>(all_scores);
+//             neg_scores = std::get<1>(all_scores);
+//             inv_pos_scores = std::get<2>(all_scores);
+//             inv_neg_scores = std::get<3>(all_scores);
+//         }
+
+//         {
+//             nvtx3::scoped_range r{"loss_compute"};
+//             if (inv_neg_scores.defined()) {
+//                 torch::Tensor rhs_loss = loss_function_->operator()(pos_scores, neg_scores, true);
+//                 torch::Tensor lhs_loss = loss_function_->operator()(inv_pos_scores, inv_neg_scores, true);
+//                 loss = lhs_loss + rhs_loss;
+//             } else {
+//                 loss = (*loss_function_)(pos_scores, neg_scores, true);
+//             }
+//         }
+
+//     } else if (learning_task_ == LearningTask::NODE_CLASSIFICATION) {
+//         torch::Tensor y_pred;
+
+//         {
+//             nvtx3::scoped_range r{"forward_nc"};
+//             y_pred = forward_nc(batch->node_embeddings_, batch->node_features_, batch->dense_graph_, true);
+//         }
+
+//         {
+//             nvtx3::scoped_range r{"loss_compute"};
+//             loss = (*loss_function_)(y_pred, batch->node_labels_.to(torch::kInt64), false);
+//         }
+
+//     } else {
+//         throw GegeRuntimeException("Unsupported learning task for training");
+//     }
+
+//     {
+//         nvtx3::scoped_range r{"backward"};
+//         loss.backward();
+//     }
+
+//     if (call_step) {
+//         nvtx3::scoped_range r{"step"};
+//         step();
+//     }
+
+//     if (batch->node_embeddings_.defined()) {
+//         nvtx3::scoped_range r{"accumulate_gradients"};
+//         batch->accumulateGradients(sparse_lr_);
+//     }
+
+//     if (negative_sampling_method_ == NegativeSamplingMethod::GAN &&
+//         learning_task_ == LearningTask::LINK_PREDICTION) {
+
+//         if (batch->node_embeddings_g_.defined()) {
+//             nvtx3::scoped_range r{"gan_set_requires_grad"};
+//             batch->node_embeddings_g_.requires_grad_();
+//         }
+
+//         torch::Tensor encoded_nodes;
+//         torch::Tensor reward, inv_reward;
+//         torch::Tensor loss_g;
+
+//         {
+//             nvtx3::scoped_range r{"gan_forward_encoder"};
+//             encoded_nodes = encoder_->forward(batch->node_embeddings_, batch->node_features_, batch->dense_graph_, true);
+//         }
+
+//         {
+//             nvtx3::scoped_range r{"gan_get_rewards"};
+//             auto edge_decoder = std::dynamic_pointer_cast<EdgeDecoder>(decoder_);
+//             auto rewards = get_rewards(edge_decoder,
+//                                        batch->edges_,
+//                                        encoded_nodes,
+//                                        batch->dst_neg_indices_mapping_,
+//                                        batch->src_neg_indices_mapping_);
+//             reward = std::get<0>(rewards);
+//             inv_reward = std::get<1>(rewards);
+//         }
+
+//         {
+//             nvtx3::scoped_range r{"gan_forward_g"};
+//             auto edge_decoder = std::dynamic_pointer_cast<EdgeDecoder>(decoder_);
+//             loss_g = forward_g(edge_decoder,
+//                                batch->edges_,
+//                                batch->node_embeddings_g_,
+//                                batch->dst_neg_indices_mapping_,
+//                                batch->src_neg_indices_mapping_,
+//                                reward,
+//                                inv_reward);
+//         }
+
+//         {
+//             nvtx3::scoped_range r{"gan_backward"};
+//             loss_g.backward();
+//         }
+
+//         {
+//             nvtx3::scoped_range r{"gan_step"};
+//             step_g();
+//         }
+
+//         if (batch->node_embeddings_g_.defined()) {
+//             nvtx3::scoped_range r{"gan_accumulate_gradients"};
+//             batch->accumulateGradientsG(sparse_lr_);
+//         }
+//     }
+// }
 
 void Model::evaluate_batch(shared_ptr<Batch> batch) {
     if (learning_task_ == LearningTask::LINK_PREDICTION) {

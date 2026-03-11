@@ -32,11 +32,13 @@ export TORCH_CUDA_ARCH_LIST=8.0
 Run from `/home/zwang269/code/GE2/dandelion-dev`:
 
 ```bash
+
 cmake -S . -B build-cu129 \
   -DCMAKE_CUDA_COMPILER=$CUDA_HOME/bin/nvcc \
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
 cmake --build build-cu129 --target gege -j 4
+
 ```
 
 ## Install package
@@ -63,17 +65,21 @@ export PATH=$HOME/.local/bin:$PATH
 ## Run
 
 Run from `/home/zwang269/code/GE2/dandelion-dev` after the package is installed.
+
 `export PATH=$HOME/.local/bin:/usr/local/cuda-12.9/bin:$PATH`
 ### 1. Preprocess a dataset
 
-Example using the built-in Twitter dataset:
+Example using the local Twitter SNAP edge list in this checkout:
 
 ```bash
 gege_preprocess \
-  --dataset twitter \
+  --dataset custom \
+  --edges raw/twitter_combined.txt \
   --output_directory datasets/twitter \
   --dataset_split 0.9 0.05 0.05 \
-  --num_partitions 16
+  --num_partitions 16 \
+  --columns 0 1 \
+  -d ' '
 ```
 
 Example for a custom edge list:
@@ -85,6 +91,34 @@ gege_preprocess \
   --output_directory datasets/custom \
   --dataset_split 0.9 0.05 0.05 \
   --num_partitions 16
+```
+```bash
+gege_preprocess \
+  --dataset custom \
+  --edges raw/soc-LiveJournal1.txt \
+  --output_directory datasets/livejournal_16p \
+  --dataset_split 0.9 0.05 0.05 \
+  --num_partitions 16 \
+  --columns 0 1 \
+  -d ' '
+
+```
+The reader now treats `-d ' '` as generic whitespace and skips `#` comment lines, which matches the SNAP LiveJournal file format.
+
+
+Livejournal sinlge GPU preprocess
+```bash
+
+gege_preprocess \
+  --dataset custom \
+  --edges raw/soc-LiveJournal1.txt \
+  --output_directory datasets/livejournal \
+  --dataset_split 0.9 0.05 0.05 \
+  --num_partitions 1 \
+  --columns 0 1 \
+  -d $'\t'
+
+
 ```
 
 ### 2. Train
@@ -139,3 +173,4 @@ cmake -S . -B build-cu129-final \
 
 cmake --build build-cu129-final --target gege -j 4
 ```
+

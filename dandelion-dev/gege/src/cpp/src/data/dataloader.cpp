@@ -5,6 +5,7 @@
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <algorithm>
 #include <sstream>
+#include <nvtx3/nvtx3.hpp>
 
 DataLoader::DataLoader(shared_ptr<GraphModelStorage> graph_storage, LearningTask learning_task, shared_ptr<TrainingConfig> training_config,
                        shared_ptr<EvaluationConfig> evaluation_config, shared_ptr<EncoderConfig> encoder_config, vector<torch::Device> devices,
@@ -585,37 +586,110 @@ void DataLoader::finishedBatch(int32_t device_idx) {
     batch_lock_->unlock();
     batch_cv_->notify_all();
 }
-
-shared_ptr<Batch> DataLoader::getBatch(at::optional<torch::Device> device, bool perform_map, int32_t device_idx) {
-    shared_ptr<Batch> batch = getNextBatch(device_idx);
+/*
+    @zizhong: getBatch is the 1st stage of training pipeline.
+    This function cost scale will batch_size increases.
+*/
+// shared_ptr<Batch> DataLoader::getBatch(at::optional<torch::Device> device, bool perform_map, int32_t device_idx) {
+//     shared_ptr<Batch> batch = getNextBatch(device_idx);
     
+//     if (batch == nullptr) {
+//         return batch;
+//     }
+ 
+//     if (batch->task_ == LearningTask::LINK_PREDICTION) {
+//         /*
+//             @zizhong:
+//             In our KG task, it's equal to Link prediction.
+//             Focus on `edgeSample`
+//         */
+//         edgeSample(batch, device_idx);
+//     } else if (batch->task_ == LearningTask::NODE_CLASSIFICATION || batch->task_ == LearningTask::ENCODE) {
+//         nodeSample(batch, device_idx);
+//     }
+
+//     loadCPUParameters(batch);
+
+//     if (device.has_value()) {
+//         if (device.value().is_cuda()) {
+//             batch->to(device.value());
+//             loadGPUParameters(batch);
+//             batch->dense_graph_.performMap();
+//         }
+//     }
+//     /*
+//         @zizhong
+//         perform_map default value is false
+//     */
+//     if (perform_map) {
+//         batch->dense_graph_.performMap();
+//     }
+
+//     return batch;
+// }
+
+/*
+
+    NVTX version: for profiling
+*/
+shared_ptr<Batch> DataLoader::getBatch(at::optional<torch::Device> device, bool perform_map, int32_t device_idx) {
+    nvtx3::scoped_range total_r{"getBatch_total"};
+
+    shared_ptr<Batch> batch;
+
+    {
+        nvtx3::scoped_range r{"getNextBatch"};
+        batch = getNextBatch(device_idx);
+    }
+
     if (batch == nullptr) {
         return batch;
     }
- 
+
     if (batch->task_ == LearningTask::LINK_PREDICTION) {
+        /*
+            edgeSample is the most time consuming part in getBatch, especially when batch_size is large.
+        */
+        nvtx3::scoped_range r{"edgeSample"};
         edgeSample(batch, device_idx);
     } else if (batch->task_ == LearningTask::NODE_CLASSIFICATION || batch->task_ == LearningTask::ENCODE) {
+        nvtx3::scoped_range r{"nodeSample"};
         nodeSample(batch, device_idx);
     }
 
-    loadCPUParameters(batch);
+    {
+        nvtx3::scoped_range r{"loadCPUParameters"};
+        loadCPUParameters(batch);
+    }
 
-    if (device.has_value()) {
-        if (device.value().is_cuda()) {
+    if (device.has_value() && device.value().is_cuda()) {
+        {
+            nvtx3::scoped_range r{"batch_to_device"};
             batch->to(device.value());
+        }
+        {
+            nvtx3::scoped_range r{"loadGPUParameters"};
             loadGPUParameters(batch);
+        }
+        {
+            nvtx3::scoped_range r{"performMap_device_branch"};
             batch->dense_graph_.performMap();
         }
     }
 
     if (perform_map) {
+        nvtx3::scoped_range r{"performMap_final_branch"};
         batch->dense_graph_.performMap();
     }
 
     return batch;
 }
 
+/**
+    @zizhong
+    KG related sampling func.
+    ‼️ Note that it contains negative sampling!
+*/
 void DataLoader::edgeSample(shared_ptr<Batch> batch, int32_t device_idx) {
 
     if (!batch->edges_.defined()) {
@@ -692,7 +766,10 @@ void DataLoader::edgeSample(shared_ptr<Batch> batch, int32_t device_idx) {
         }
     } else {
         // map edges and negatives to their corresponding index in unique_node_indices_
-        auto tup = map_tensors(all_ids);
+
+
+        auto tup = my_map_tensors(all_ids,train_);
+        //auto tup = map_tensors(all_ids);
     
 
         batch->unique_node_indices_ = std::get<0>(tup);
@@ -728,6 +805,141 @@ void DataLoader::edgeSample(shared_ptr<Batch> batch, int32_t device_idx) {
     batch->src_neg_indices_mapping_ = src_neg_mapping;
     batch->dst_neg_indices_mapping_ = dst_neg_mapping;
 }
+
+/*
+    @zizhong
+    nvtx tag version of edgeSample
+*/
+// void DataLoader::edgeSample(shared_ptr<Batch> batch, int32_t device_idx) {
+//     {
+//         nvtx3::scoped_range r{"edgeSample_getEdges"};
+//         if (!batch->edges_.defined()) {
+//             batch->edges_ = edge_sampler_->getEdges(batch, device_idx);
+//         }
+//     }
+
+//     {
+//         nvtx3::scoped_range r{"edgeSample_negativeSample"};
+//         if (negative_sampler_ != nullptr) {
+//             negativeSample(batch);
+//         }
+//     }
+
+//     std::vector<torch::Tensor> all_ids;
+//     {
+//         nvtx3::scoped_range r{"edgeSample_collect_all_ids"};
+//         all_ids = {batch->edges_.select(1, 0), batch->edges_.select(1, -1)};
+
+//         if (batch->src_neg_indices_.defined()) {
+//             all_ids.emplace_back(batch->src_neg_indices_.flatten(0, 1));
+//         }
+
+//         if (batch->dst_neg_indices_.defined()) {
+//             all_ids.emplace_back(batch->dst_neg_indices_.flatten(0, 1));
+//         }
+//     }
+
+//     torch::Tensor src_mapping;
+//     torch::Tensor dst_mapping;
+//     torch::Tensor src_neg_mapping;
+//     torch::Tensor dst_neg_mapping;
+
+//     std::vector<torch::Tensor> mapped_tensors;
+
+//     if (neighbor_sampler_ != nullptr) {
+//         {
+//             nvtx3::scoped_range r{"edgeSample_unique_root_nodes"};
+//             batch->root_node_indices_ = std::get<0>(torch::_unique(torch::cat(all_ids)));
+//         }
+
+//         {
+//             nvtx3::scoped_range r{"edgeSample_getNeighbors"};
+//             batch->dense_graph_ = neighbor_sampler_->getNeighbors(
+//                 batch->root_node_indices_,
+//                 graph_storage_->current_subgraph_state_->in_memory_subgraph_);
+//             batch->unique_node_indices_ = batch->dense_graph_.getNodeIDs();
+//         }
+
+//         torch::Tensor sorted_map;
+//         torch::Tensor map_to_unsorted;
+//         {
+//             nvtx3::scoped_range r{"edgeSample_sort_unique_node_indices"};
+//             auto tup = torch::sort(batch->unique_node_indices_);
+//             sorted_map = std::get<0>(tup);
+//             map_to_unsorted = std::get<1>(tup);
+//         }
+
+//         {
+//             nvtx3::scoped_range r{"edgeSample_apply_tensor_map"};
+//             mapped_tensors = apply_tensor_map(sorted_map, all_ids);
+//         }
+
+//         {
+//             nvtx3::scoped_range r{"edgeSample_remap_with_neighbors"};
+//             int64_t num_nbrs_sampled = batch->dense_graph_.hop_offsets_[-2].item<int64_t>();
+
+//             src_mapping = map_to_unsorted.index_select(0, mapped_tensors[0]) - num_nbrs_sampled;
+//             dst_mapping = map_to_unsorted.index_select(0, mapped_tensors[1]) - num_nbrs_sampled;
+
+//             if (batch->src_neg_indices_.defined()) {
+//                 src_neg_mapping = map_to_unsorted.index_select(0, mapped_tensors[2]).reshape(batch->src_neg_indices_.sizes()) - num_nbrs_sampled;
+//             }
+
+//             if (batch->dst_neg_indices_.defined()) {
+//                 dst_neg_mapping = map_to_unsorted.index_select(0, mapped_tensors[3]).reshape(batch->dst_neg_indices_.sizes()) - num_nbrs_sampled;
+//             }
+//         }
+//     } else {
+//         {
+//             /*
+//             map_tensors is the most time consuming part in edgeSample when neighbor sampling is not used, and its cost will increase as batch_size increases.
+
+
+//             */
+//             nvtx3::scoped_range r{"edgeSample_map_tensors"};
+//             auto tup = map_tensors(all_ids);
+
+//             batch->unique_node_indices_ = std::get<0>(tup);
+
+//             if (batch->unique_node_indices_[0].item<int64_t>() == -1) {
+//                 SPDLOG_ERROR("Node mapping is broken. Try repartition again.");
+//                 throw std::runtime_error("");
+//             }
+
+//             mapped_tensors = std::get<1>(tup);
+
+//             src_mapping = mapped_tensors[0];
+//             dst_mapping = mapped_tensors[1];
+
+//             if (batch->src_neg_indices_.defined()) {
+//                 src_neg_mapping = mapped_tensors[2].reshape(batch->src_neg_indices_.sizes());
+//             }
+
+//             if (batch->dst_neg_indices_.defined()) {
+//                 dst_neg_mapping = mapped_tensors[3].reshape(batch->dst_neg_indices_.sizes());
+//             }
+//         }
+//     }
+
+//     {
+//         nvtx3::scoped_range r{"edgeSample_remap_edges"};
+//         if (batch->edges_.size(1) == 2) {
+//             batch->edges_ = torch::stack({src_mapping, dst_mapping}).transpose(0, 1);
+//         } else if (batch->edges_.size(1) == 3) {
+//             batch->edges_ = torch::stack({src_mapping, batch->edges_.select(1, 1), dst_mapping}).transpose(0, 1);
+//         } else {
+//             throw TensorSizeMismatchException(batch->edges_, "Edge list must be a 3 or 2 column tensor");
+//         }
+//     }
+
+//     {
+//         nvtx3::scoped_range r{"edgeSample_store_neg_mappings"};
+//         batch->src_neg_indices_mapping_ = src_neg_mapping;
+//         batch->dst_neg_indices_mapping_ = dst_neg_mapping;
+//     }
+// }
+
+
 
 void DataLoader::nodeSample(shared_ptr<Batch> batch, int32_t device_idx) {
     if (batch->task_ == LearningTask::ENCODE) {
@@ -787,7 +999,10 @@ void DataLoader::loadCPUParameters(shared_ptr<Batch> batch) {
 
     batch->load_timestamp_ = timestamp_;
 }
-
+/*
+    @zizhong
+    This function is the most outter part that exhibit sparse access.
+*/
 void DataLoader::loadGPUParameters(shared_ptr<Batch> batch, int32_t device_idx) {
     if (graph_storage_->storage_ptrs_.node_embeddings != nullptr) {
         if (graph_storage_->storage_ptrs_.node_embeddings->device_ == torch::kCUDA) {
